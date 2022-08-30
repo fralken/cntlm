@@ -98,9 +98,13 @@ for i in $TESTS; do
 	echo $RET
 done
 
-while [ $1 ]
+if [ -z "$FEATURES" ]; then
+	FEATURES=$*
+fi
+
+for f in $FEATURES
 do
-	case $1 in
+	case $f in
 		--enable-kerberos)
 			printf "#define ENABLE_KERBEROS" >> $CONFIG
 			echo "" >> $CONFIG
@@ -110,12 +114,12 @@ do
 			echo "" >> $CONFIG
 			;;
 		*)
-			echo "Unknown flag $1"
+			echo "Unknown flag $f"
 			rm -f $CONFIG
 			;;
 	esac
-	shift
 done
+
 if [ -f $CONFIG ]; then
 	echo "" >> $CONFIG
 	echo "#endif // CONFIGURE_CONFIG_H" >> $CONFIG
