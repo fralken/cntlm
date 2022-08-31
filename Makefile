@@ -90,7 +90,7 @@ ifneq ($(findstring CYGWIN,$(OS)),)
 	OBJS+=sspi.o win/resources.o
 endif
 
-ENABLE_STATIC=$(shell grep -c ENABLE_STATIC config/config.h)
+ENABLE_STATIC=$(shell grep -c ENABLE_STATIC config/config.h 2>/dev/null)
 ifeq ($(ENABLE_STATIC),1)
         LDFLAGS+=-static
 endif
@@ -227,7 +227,7 @@ endif
 	@sed "s/\$$VERSION/$(VER)/g" $^ > $@
 
 uninstall:
-	rm -f $(BINDIR)/$(NAME) $(MANDIR)/man1/$(NAME).1 2>/dev/null || true
+	@rm -f $(BINDIR)/$(NAME) $(MANDIR)/man1/$(NAME).1 2>/dev/null || true
 
 clean:
 	@rm -f config/endian config/gethostname config/socklen_t config/strdup config/arc4random_buf config/strlcat config/strlcpy config/memset_s config/gss config/*.exe
