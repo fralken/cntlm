@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+    - 'v*' 
+
+jobs:
+  build:
+    name: Release
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        include:
+        - os: windows-latest
+          command: bash -c "./configure && make win"
+          env:
+            FEATURES:
+        - os: ubuntu-latest
+          command: make deb && make rpm
+          env:
+            FEATURES: --enable-kerberos
+
+    steps:
+      - name: Git config (Windows only)
+        run: git config --global core.autocrlf input
+        if: ${{ matrix.os == 'windows-latest' }}
+
+      - uses: actions/checkout@v3
+      
+      - name: Version
+        run: echo "::set-output name=version::$(cat VERSION)"
+        id: version
+
+      - name: Install Cygwin (Windows only) 
+        uses: cygwin/cygwin-install-action@master
+        with:
+          packages: >-
+            gcc-core
+            make
+            ghostscript
+            dos2unix
+            zip
+            cygrunsrv
+        if: ${{ matrix.os == 'windows-latest' }}
+
+      - name: Install packages for creating packages (Ubuntu only)
+        run: sudo apt install -y fakeroot rpm dpkg debhelper
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+
+      - name: Install packages for Kerberos support (Ubuntu only)
+        run: sudo apt install -y libkrb5-dev
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+
+      - name: Build
+        run: ${{ matrix.command }}
+        env: ${{ matrix.env }}
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          files: cntlm?${{ steps.version.outputs.version }}*
