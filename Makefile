@@ -20,11 +20,11 @@ OS		:= $(shell uname -s)
 OSLDFLAGS	:= $(shell [ $(OS) = "SunOS" ] && echo "-lrt -lsocket -lnsl")
 LDFLAGS		:= -lpthread -lm $(OSLDFLAGS)
 CYGWIN_REQS	:= cygwin1.dll cygrunsrv.exe
-GCC_VER := $(shell ${CC} -dumpfullversion | sed -e 's/\.\([0-9][0-9]\)/\1/g' -e 's/\.\([0-9]\)/0\1/g' -e 's/^[0-9]\{3,4\}$$/&00/')
-GCC_GTEQ_430 := $(shell expr ${GCC_VER} \>= 40300)
-GCC_GTEQ_450 := $(shell expr ${GCC_VER} \>= 40500)
-GCC_GTEQ_600 := $(shell expr ${GCC_VER} \>= 60000)
-GCC_GTEQ_700 := $(shell expr ${GCC_VER} \>= 70000)
+GCC_VER := $(shell ${CC} -dumpfullversion 2>/dev/null | sed -e 's/\.\([0-9][0-9]\)/\1/g' -e 's/\.\([0-9]\)/0\1/g' -e 's/^[0-9]\{3,4\}$$/&00/')
+GCC_GTEQ_430 := $(shell expr ${GCC_VER} \>= 40300 2>/dev/null)
+GCC_GTEQ_450 := $(shell expr ${GCC_VER} \>= 40500 2>/dev/null)
+GCC_GTEQ_600 := $(shell expr ${GCC_VER} \>= 60000 2>/dev/null)
+GCC_GTEQ_700 := $(shell expr ${GCC_VER} \>= 70000 2>/dev/null)
 
 CFLAGS	+= -std=c99 -D__BSD_VISIBLE -D_ALL_SOURCE -D_XOPEN_SOURCE=600 -D_POSIX_C_SOURCE=200112 -D_ISOC99_SOURCE -D_REENTRANT -D_BSD_SOURCE -D_DEFAULT_SOURCE -D_DARWIN_C_SOURCE -DVERSION=\"'$(VER)'\"
 CFLAGS	+= -Wall -Wextra -pedantic -Wshadow -Wcast-qual -Wbad-function-cast -Wstrict-prototypes -Wno-overlength-strings
@@ -70,13 +70,13 @@ else
 	OBJS=utils.o ntlm.o xcrypt.o config.o socket.o acl.o auth.o http.o forward.o direct.o scanner.o pages.o proxy.o pac.o duktape.o main.o
 endif
 
-ENABLE_KERBEROS=$(shell grep -c ENABLE_KERBEROS config/config.h)
+ENABLE_KERBEROS=$(shell grep -c ENABLE_KERBEROS config/config.h 2>/dev/null)
 ifeq ($(ENABLE_KERBEROS),1)
 	OBJS+=kerberos.o
 	LDFLAGS+=-lgssapi_krb5
 endif
 
-ENABLE_STATIC=$(shell grep -c ENABLE_STATIC config/config.h)
+ENABLE_STATIC=$(shell grep -c ENABLE_STATIC config/config.h 2>/dev/null)
 ifeq ($(ENABLE_STATIC),1)
         LDFLAGS+=-static
 endif
@@ -211,12 +211,12 @@ endif
 	@sed "s/\$$VERSION/$(VER)/g" $^ > $@
 
 uninstall:
-	rm -f $(BINDIR)/$(NAME) $(MANDIR)/man1/$(NAME).1 2>/dev/null || true
+	@rm -f $(BINDIR)/$(NAME) $(MANDIR)/man1/$(NAME).1 2>/dev/null || true
 
 clean:
 	@rm -f config/endian config/gethostname config/strdup config/socklen_t config/arc4random_buf config/strlcat config/strlcpy config/*.exe
 	@rm -f *.o cntlm cntlm.exe configure-stamp build-stamp config/config.h
-	rm -f $(patsubst %, win/%, $(CYGWIN_REQS) cntlm.exe cntlm.ini LICENSE.txt resources.o setup.iss cntlm_manual.pdf)
+	@rm -f $(patsubst %, win/%, $(CYGWIN_REQS) cntlm.exe cntlm.ini LICENSE.txt resources.o setup.iss cntlm_manual.pdf)
 	@if [ -h Makefile ]; then rm -f Makefile; mv Makefile.gcc Makefile; fi
 
 distclean: clean
