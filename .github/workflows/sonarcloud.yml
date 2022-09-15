@@ -41,7 +41,7 @@ jobs:
         run: sudo apt install -y libkrb5-dev
       - name: Run build-wrapper
         run: |
-          ./configure
+          ./configure --enable-kerberos
           build-wrapper-linux-x86-64 --out-dir ${{ env.BUILD_WRAPPER_OUT_DIR }} make
       - name: Run sonar-scanner
         env:
