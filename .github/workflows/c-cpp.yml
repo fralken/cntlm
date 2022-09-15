@@ -52,5 +52,5 @@ jobs:
         make distclean
     - name: Build via scan-build
       run: |
-        ./configure
+        ./configure --enable-kerberos
         scan-build --force-analyze-debug-code make
