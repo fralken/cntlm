@@ -130,7 +130,7 @@ beginning:
 		authok = 1;
 		was_cached = 1;
 	} else {
-		tcreds = new_auth();
+		tcreds = zmalloc(sizeof(struct auth_s));
 		sd = proxy_connect(tcreds, request->url, request->hostname);
 		if (sd == -2) {
 			rc = (void *)-2;
@@ -597,7 +597,7 @@ int forward_tunnel(void *thread_data) {
 	char saddr[INET6_ADDRSTRLEN] = {0};
 	INET_NTOP(&((struct thread_arg_s *)thread_data)->addr, saddr, INET6_ADDRSTRLEN);
 
-	tcreds = new_auth();
+	tcreds = zmalloc(sizeof(struct auth_s));
 	if ((pos = strchr(hostname, ':')) != NULL) // separate port
 		*pos = 0;
 	sd = proxy_connect(tcreds, thost, hostname);
@@ -648,8 +648,7 @@ void magic_auth_detect(const char *url) {
 		{  2,  0,  0,      0,     4 }
 	};
 
-	tcreds = new_auth();
-	copy_auth(tcreds, g_creds, /* fullcopy */ 1);
+	tcreds = dup_auth(g_creds, /* fullcopy */ 1);
 
 	if (   is_memory_all_zero(tcreds->passnt, ARRAY_SIZE(tcreds->passnt))
 		|| is_memory_all_zero(tcreds->passlm, ARRAY_SIZE(tcreds->passlm))
