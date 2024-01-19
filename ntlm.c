@@ -74,7 +74,7 @@ static void ntlm2_calc_resp(char **nthash, int *ntlen, char **lmhash, int *lmlen
 	char *blob;
 	char *nonce;
 	char *buf;
-	int64_t tw;
+	uint64_t tw;
 	int blen;
 
 	nonce = zmalloc(8 + 1);
@@ -95,7 +95,7 @@ static void ntlm2_calc_resp(char **nthash, int *ntlen, char **lmhash, int *lmlen
 	VAL(blob, uint32_t, 0) = U32LE(0x00000101);
 	VAL(blob, uint32_t, 4) = U32LE(0);
 	VAL(blob, uint64_t, 8) = U64LE(tw);
-	VAL(blob, uint64_t, 16) = U64LE(VAL(nonce, uint64_t, 0));
+	VAL(blob, uint64_t, 16) = VAL(nonce, uint64_t, 0);
 	VAL(blob, uint32_t, 24) = U32LE(0);
 	memcpy(blob+28, MEM(challenge, char, tbofs), tblen);
 	memset(blob+28+tblen, 0, 4);
