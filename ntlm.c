@@ -72,17 +72,16 @@ static void ntlm2_calc_resp(char **nthash, int *ntlen, char **lmhash, int *lmlen
 		const char *passnt2, char *challenge, int tbofs, int tblen) {
 	char *tmp;
 	char *blob;
-	char *nonce;
+	uint64_t nonce;
 	char *buf;
 	uint64_t tw;
 	int blen;
 
-	nonce = zmalloc(8 + 1);
-	VAL(nonce, uint64_t, 0) = getrandom64();
+	nonce = getrandom64();
 	tw = ((uint64_t)time(NULL) + 11644473600LLU) * 10000000LLU;
 
 	if (debug) {
-		tmp = printmem(nonce, 8, 7);
+		tmp = printmem((const char*)&nonce, 8, 7);
 #ifdef PRId64
 		printf("NTLMv2:\n\t    Nonce: %s\n\tTimestamp: %"PRId64"\n", tmp, tw);
 #else
@@ -95,7 +94,7 @@ static void ntlm2_calc_resp(char **nthash, int *ntlen, char **lmhash, int *lmlen
 	VAL(blob, uint32_t, 0) = U32LE(0x00000101);
 	VAL(blob, uint32_t, 4) = U32LE(0);
 	VAL(blob, uint64_t, 8) = U64LE(tw);
-	VAL(blob, uint64_t, 16) = VAL(nonce, uint64_t, 0);
+	VAL(blob, uint64_t, 16) = U64LE(nonce);
 	VAL(blob, uint32_t, 24) = U32LE(0);
 	memcpy(blob+28, MEM(challenge, char, tbofs), tblen);
 	memset(blob+28+tblen, 0, 4);
@@ -120,13 +119,12 @@ static void ntlm2_calc_resp(char **nthash, int *ntlen, char **lmhash, int *lmlen
 	*lmhash = zmalloc(*lmlen + 1);
 	buf = zmalloc(16 + 1);
 	memcpy(buf, MEM(challenge, char, 24), 8);
-	memcpy(buf+8, nonce, 8);
+	VAL(buf, uint64_t, 8) = U64LE(nonce);
 	hmac_md5(passnt2, 16, buf, 16, *lmhash);
-	memcpy(*lmhash+16, nonce, 8);
+	VAL(*lmhash, uint64_t, 16) = U64LE(nonce);
 	free(buf);
 
 	free(blob);
-	free(nonce);
 	return;
 }
 
