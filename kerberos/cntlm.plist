@@ -10,7 +10,7 @@
         <true />
         <key>ProgramArguments</key>
         <array>
-            <string>{PATH}/listener.swift</string>
+            <string>{PATH}/listener</string>
             <string>-start</string>
             <string>{PATH}/cntlm.sh start</string>
             <string>-notifications</string>
