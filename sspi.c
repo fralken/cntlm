@@ -22,6 +22,7 @@
 
 #ifdef __CYGWIN__
 
+#include "utils.h"
 #include "sspi.h"
 
 // SSPI mode
