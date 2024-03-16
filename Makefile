@@ -26,6 +26,13 @@ OSLDFLAGS	:= $(shell [ $(OS) = "SunOS" ] && echo "-lrt -lsocket -lnsl")
 LDFLAGS		:= -lpthread -lm $(OSLDFLAGS)
 CYGWIN_REQS	:= cygwin1.dll cygrunsrv.exe
 
+ifeq ($(OS),Darwin)
+	ifndef ARCH
+		ARCH := $(shell uname -m)
+	endif
+	CFLAGS := -arch $(ARCH)
+endif
+
 ifeq ($(CC),gcc)
 GCC_VER := $(shell ${CC} -dumpfullversion | sed -e 's/\.\([0-9][0-9]\)/\1/g' -e 's/\.\([0-9]\)/0\1/g' -e 's/^[0-9]\{3,4\}$$/&00/')
 GCC_GTEQ_430 := $(shell expr ${GCC_VER} \>= 40300)
@@ -184,6 +191,12 @@ rpm:
 		fakeroot rpm/rules binary; \
 		fakeroot rpm/rules clean; \
 	fi
+
+mac: $(NAME) $(NAME)-$(VER)-apple-darwin-$(ARCH).zip
+
+$(NAME)-$(VER)-apple-darwin-$(ARCH).zip:
+	@echo macOS: creating ZIP release for manual installs
+	zip -9 $@ $(NAME) doc/cntlm.conf doc/cntlm.1 LICENSE
 
 win: win/setup.iss $(NAME) win/cntlm_manual.pdf win/cntlm.ini win/LICENSE.txt $(NAME)-$(VER)-win64.exe $(NAME)-$(VER)-win64.zip
 
