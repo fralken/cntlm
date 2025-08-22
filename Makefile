@@ -31,6 +31,8 @@ ifeq ($(OS),Darwin)
 		ARCH := $(shell uname -m)
 	endif
 	CFLAGS := -arch $(ARCH)
+# Change binary directory for macOS
+	BINDIR := $(DESTDIR)$(PREFIX)/bin
 endif
 
 ifeq ($(CC),gcc)
@@ -192,14 +194,41 @@ rpm:
 		fakeroot rpm/rules clean; \
 	fi
 
-mac: $(NAME) $(NAME)-$(VER)-apple-darwin-$(ARCH).zip
+mac: $(NAME) $(NAME)-$(VER)-macos-$(ARCH).zip $(NAME)-$(VER)-macos-$(ARCH).pkg
 
-$(NAME)-$(VER)-apple-darwin-$(ARCH).zip:
+$(NAME)-$(VER)-macos-$(ARCH).zip:
 	@echo macOS: creating ZIP release for manual installs
 	@mkdir -p $(NAME)-$(VER)
 	@cp $(NAME) doc/$(NAME).conf doc/$(NAME).1 LICENSE $(NAME)-$(VER)/
 	@zip -9 $@ $(NAME)-$(VER)/*
 	@rm -rf $(NAME)-$(VER)
+	@echo "Created $@"
+
+$(NAME)-$(VER)-macos-$(ARCH).pkg:
+	@echo macOS: preparing binaries for PKG installer
+	@rm -rf pkgroot
+	@mkdir -p pkgroot/$(BINDIR)
+	@cp $(NAME) pkgroot/$(BINDIR)/$(NAME)
+	@chmod 755 pkgroot/$(BINDIR)/$(NAME)
+	@mkdir -p pkgroot/$(SYSCONFDIR)
+	@cp doc/$(NAME).conf pkgroot/$(SYSCONFDIR)/$(NAME).conf
+	@chmod 600 pkgroot/$(SYSCONFDIR)/$(NAME).conf
+	@mkdir -p pkgroot/$(MANDIR)/man1
+	@cp doc/$(NAME).1 pkgroot/$(MANDIR)/man1/$(NAME).1
+	@chmod 644 pkgroot/$(MANDIR)/man1/$(NAME).1
+	@pkgbuild --root pkgroot --identifier com.$(NAME).proxy.$(ARCH) --version $(VER) --install-location / pkgbuild-$(NAME)-$(ARCH).pkg
+	@echo '<?xml version="1.0" encoding="utf-8"?>' > distribution.xml
+	@echo '<installer-gui-script minSpecVersion="1">' >> distribution.xml
+	@echo '<title>$(NAME) $(VER) ($(ARCH))</title>' >> distribution.xml
+	@echo '<options customize="never" require-scripts="false"/>' >> distribution.xml
+	@echo '<domains enable_anywhere="true"/>' >> distribution.xml
+	@echo '<choices-outline><line choice="default"/></choices-outline>' >> distribution.xml
+	@echo '<choice id="default"><pkg-ref id="com.$(NAME).proxy.$(ARCH)"/></choice>' >> distribution.xml
+	@echo '<pkg-ref id="com.$(NAME).proxy.$(ARCH)" version="$(VER)" onConclusion="none">pkgbuild-$(NAME)-$(ARCH).pkg</pkg-ref>' >> distribution.xml
+	@echo '</installer-gui-script>' >> distribution.xml
+	@productbuild --distribution distribution.xml --package-path . --resources . --version $(VER) $(NAME)-$(VER)-macos-$(ARCH).pkg
+	@rm -rf pkgroot pkgbuild-$(NAME)-$(ARCH).pkg distribution.xml
+	@echo "Created $@"
 
 win: win/setup.iss $(NAME) win/cntlm_manual.pdf win/cntlm.ini win/LICENSE.txt $(NAME)-$(VER)-win64.exe $(NAME)-$(VER)-win64.zip
 
@@ -215,12 +244,14 @@ else
 endif
 	@echo Win64: generating GUI installer
 	@win/Inno5/ISCC.exe /Q win/setup.iss #/Q win/setup.iss
+	@echo "Created $@"
 
 $(NAME)-$(VER)-win64.zip:
 	@echo Win64: creating ZIP release for manual installs
 	@ln -s win $(NAME)-$(VER)
 	@zip -9 $@ $(patsubst %, $(NAME)-$(VER)/%, cntlm.exe $(CYGWIN_REQS) cntlm.ini LICENSE.txt cntlm_manual.pdf)
 	@rm -f $(NAME)-$(VER)
+	@echo "Created $@"
 
 win/cntlm.ini: doc/cntlm.conf
 	@cat doc/cntlm.conf | unix2dos > $@
@@ -243,7 +274,7 @@ endif
 	@sed "s/\$$VERSION/$(VER)/g" $^ > $@
 
 uninstall:
-	rm -f $(BINDIR)/$(NAME) $(MANDIR)/man1/$(NAME).1 2>/dev/null || true
+	rm -f $(BINDIR)/$(NAME) $(MANDIR)/man1/$(NAME).1 $(SYSCONFDIR)/$(NAME).conf 2>/dev/null || true
 
 clean:
 	@rm -f config/endian config/gethostname config/socklen_t config/strdup config/arc4random_buf config/strlcat config/strlcpy config/memset_s config/gss config/*.exe
@@ -260,6 +291,6 @@ ifeq ($(OS),Linux)
 		fakeroot rpm/rules clean; \
 	fi
 endif
-	@rm -f *.exe *.deb *.rpm *.tgz *.tar.gz *.tar.bz2 *.zip *.exe tags ctags pid 2>/dev/null
+	@rm -f *.exe *.deb *.rpm *.tgz *.tar.gz *.tar.bz2 *.zip *.exe *.pkg tags ctags pid 2>/dev/null
 
 .PHONY: all install tgz tbz2 deb rpm win uninstall clean distclean
