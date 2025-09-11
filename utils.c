@@ -685,7 +685,7 @@ char *trimr(char * const buf) {
 
 	assert(buf != NULL);
 
-	for (i = strlen(buf)-1; i >= 0 && isspace((u_char)buf[i]); --i);
+	for (i = strlen(buf)-1; i >= 0 && isspace((u_char)buf[i]); --i) {};
 	buf[i+1] = 0;
 
 	return buf;
@@ -816,10 +816,10 @@ char *uppercase(char * const str) {
 	return str;
 }
 
-int unicode(char **dst, const char * const src) {
+size_t unicode(char **dst, const char * const src) {
 	char *tmp;
-	int l;
-	int i;
+	size_t l;
+	size_t i;
 
 	if (!src) {
 		*dst = NULL;
