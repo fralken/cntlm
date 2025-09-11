@@ -288,9 +288,9 @@ int ntlm_request(char **dst, struct auth_s *creds) {
 	return 32+dlen+hlen;
 }
 
-static char *printuc(const char *src, int len) {
+static char *printuc(const char *src, size_t len) {
 	char *tmp;
-	int i;
+	size_t i;
 
 	tmp = zmalloc((len+1)/2 + 1);
 	for (i = 0; i < len/2; ++i) {
