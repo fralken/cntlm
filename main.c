@@ -755,8 +755,11 @@ int main(int argc, char **argv) {
 	while ((i = getopt(argc, argv, ":-:T:a:c:d:fghIl:p:r:su:vw:x:A:BD:F:G:HL:M:N:O:P:R:S:U:X:q")) != -1) {
 		switch (i) {
 			case 'A':
+				if (!acl_add(&rules, optarg, ACL_ALLOW))
+					myexit(1);
+				break;
 			case 'D':
-				if (!acl_add(&rules, optarg, (i == 'A' ? ACL_ALLOW : ACL_DENY)))
+				if (!acl_add(&rules, optarg, ACL_DENY))
 					myexit(1);
 				break;
 			case 'a':

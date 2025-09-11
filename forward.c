@@ -210,7 +210,7 @@ beginning:
 			 * we were called. If former, set proxy_alive=1 to cache the connection.
 			 */
 			if (loop == 0 && hostname && data[0]->hostname
-					&& strcasecmp(hostname, data[0]->hostname)) {
+					&& strcasecmp(hostname, data[0]->hostname) != 0) {
 				if (debug)
 					printf("\n******* F RETURN: %s *******\n", data[0]->url);
 				if (authok && data[0]->http_version >= 11

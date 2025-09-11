@@ -274,7 +274,7 @@ rr_data_t direct_request(void *cdata, rr_data_const_t request) {
 			 * approach.
 			 */
 			if (loop == 0 && hostname && data[0]->hostname
-					&& (strcasecmp(hostname, data[0]->hostname) || port != data[0]->port)) {
+					&& (strcasecmp(hostname, data[0]->hostname) || port != data[0]->port) != 0) {
 				if (debug)
 					printf("\n******* D RETURN: %s *******\n", data[0]->url);
 

@@ -57,7 +57,7 @@ config_t config_open(const char *fname) {
 		/*
 		 * Find first non-empty character
 		 */
-		for (j = 0; j < len && isspace((u_char)buf[j]); ++j);
+		for (j = 0; j < len && isspace((u_char)buf[j]); ++j) {};
 
 		/*
 		 * Comment?
@@ -68,7 +68,7 @@ config_t config_open(const char *fname) {
 		/*
 		 * Find end of keyword
 		 */
-		for (i = j; j < len && isalnum((u_char)buf[j]); ++j);
+		for (i = j; j < len && isalnum((u_char)buf[j]); ++j) {};
 
 		/*
 		 * Malformed?
@@ -80,8 +80,8 @@ config_t config_open(const char *fname) {
 		 * Is it a section?
 		 */
 		if (buf[j] == '[') {
-			for (++j; j < len && isspace((u_char)buf[j]); ++j);
-			for (slen = j; j < len && j-slen < MINIBUF_SIZE-1 && buf[j] != ']' && !isspace((u_char)buf[j]); ++j);
+			for (++j; j < len && isspace((u_char)buf[j]); ++j) {};
+			for (slen = j; j < len && j-slen < MINIBUF_SIZE-1 && buf[j] != ']' && !isspace((u_char)buf[j]); ++j) {};
 			if (j-slen > 0) {
 				strlcpy(section, buf+slen, j-slen+1);
 			}
@@ -96,7 +96,7 @@ config_t config_open(const char *fname) {
 		/*
 		 * Find next non-empty character
 		 */
-		for (; j < len && isspace((u_char)buf[j]); ++j);
+		for (; j < len && isspace((u_char)buf[j]); ++j) {};
 		if (j >= len || buf[j] == '#' || buf[j] == ';') {
 			free(key);
 			continue;
@@ -107,7 +107,7 @@ config_t config_open(const char *fname) {
 		 */
 		if (buf[j] == '"') {
 			quote = 1;
-			for (i = ++j; j < len && buf[i] != '"'; ++i);
+			for (i = ++j; j < len && buf[i] != '"'; ++i) {};
 			if (i >= len) {
 				free(key);
 				continue;
