@@ -689,6 +689,7 @@ void magic_auth_detect(const char *url) {
 			free_rr_data(&res);
 			free_rr_data(&req);
 			free(host);
+			free(tcreds);
 			return;
 		}
 
@@ -756,6 +757,6 @@ void magic_auth_detect(const char *url) {
 	} else
 		printf("\nWrong credentials, invalid URL or proxy doesn't support NTLM.\n");
 
-	if (host)
-		free(host);
+	free(host);
+	free(tcreds);
 }

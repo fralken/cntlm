@@ -738,6 +738,7 @@ int main(int argc, char **argv) {
 	hlist_const_t list;
 	int i;
 	int w;
+	size_t p;
 
 	int cd = 0;
 	int help = 0;
@@ -763,6 +764,7 @@ int main(int argc, char **argv) {
 	char *magic_detect = NULL;
 	int pac = 0;
 	char *pac_file;
+	int parent_count = 0;
 
 	pac_file = zmalloc(PATH_MAX);
 	g_creds = zmalloc(sizeof(struct auth_s));
@@ -920,10 +922,10 @@ int main(int argc, char **argv) {
 				strlcpy(cuid, optarg, MINIBUF_SIZE);
 				break;
 			case 'u':
-				i = (int)strcspn(optarg, "@");
-				if (i != (int)strlen(optarg)) {
-					strlcpy(cuser, optarg, MIN(MINIBUF_SIZE, i+1));
-					strlcpy(cdomain, optarg+i+1, MINIBUF_SIZE);
+				p = strcspn(optarg, "@");
+				if (p != strlen(optarg)) {
+					strlcpy(cuser, optarg, MIN(MINIBUF_SIZE, p+1));
+					strlcpy(cdomain, optarg+p+1, MINIBUF_SIZE);
 				} else {
 					strlcpy(cuser, optarg, MINIBUF_SIZE);
 				}
@@ -1084,7 +1086,7 @@ int main(int argc, char **argv) {
 	i = optind;
 	while (i < argc) {
 		tmp = strchr(argv[i], ':');
-		parent_add(argv[i], !tmp && i+1 < argc ? atoi(argv[i+1]) : 0);
+		parent_count = parent_add(argv[i], !tmp && i+1 < argc ? atoi(argv[i+1]) : 0);
 		i += (!tmp ? 2 : 1);
 	}
 
@@ -1220,7 +1222,7 @@ int main(int argc, char **argv) {
 		 * Add the rest of parent proxies.
 		 */
 		while ((tmp = config_pop(cf, "Proxy"))) {
-			parent_add(tmp, 0);
+			parent_count = parent_add(tmp, 0);
 			free(tmp);
 		}
 
@@ -1312,9 +1314,9 @@ int main(int argc, char **argv) {
 			if (!scanner_plugin_maxsize)
 				scanner_plugin_maxsize = 1;
 
-			if ((i = (int)strlen(tmp))) {
-				head = zmalloc(i + 3);
-				snprintf(head, i+3, "*%s*", tmp);
+			if ((p = strlen(tmp))) {
+				head = zmalloc(p + 3);
+				snprintf(head, p+3, "*%s*", tmp);
 				scanner_agent_list = plist_add(scanner_agent_list, 0, head);
 			}
 			free(tmp);
@@ -1361,7 +1363,7 @@ int main(int argc, char **argv) {
 		strlcpy(pac_file, resolved, PATH_MAX);
 	}
 
-	if (!interactivehash && !parent_available() && !pac)
+	if (!interactivehash && parent_count == 0 && !pac)
 		croak("Parent proxy address missing.\n", interactivepwd || magic_detect);
 
 	if (!interactivehash && !magic_detect && !proxyd_list)
@@ -1433,11 +1435,11 @@ int main(int argc, char **argv) {
 		tcsetattr(0, TCSADRAIN, &termnew);
 		tmp = fgets(cpassword, PASSWORD_BUFSIZE, stdin);
 		tcsetattr(0, TCSADRAIN, &termold);
-		i = (int)strlen(cpassword) - 1;
-		if (cpassword[i] == '\n') {
-			cpassword[i] = 0;
-			if (cpassword[i - 1] == '\r')
-				cpassword[i - 1] = 0;
+		p = strlen(cpassword) - 1;
+		if (cpassword[p] == '\n') {
+			cpassword[p] = 0;
+			if (cpassword[p - 1] == '\r')
+				cpassword[p - 1] = 0;
 		}
 		printf("\n");
 	}
@@ -1833,8 +1835,8 @@ int main(int argc, char **argv) {
 		} else if (cd < 0 && !quit)
 			syslog(LOG_ERR, "Serious error during select: %s\n", strerror(errno));
 
+		pthread_mutex_lock(&threads_mtx);
 		if (threads_list) {
-			pthread_mutex_lock(&threads_mtx);
 			t = threads_list;
 			while (t) {
 				plist_t tmp_next = t->next;
@@ -1847,8 +1849,8 @@ int main(int argc, char **argv) {
 				t = tmp_next;
 			}
 			threads_list = NULL;
-			pthread_mutex_unlock(&threads_mtx);
 		}
+		pthread_mutex_unlock(&threads_mtx);
 	}
 
 bailout:
@@ -1868,7 +1870,7 @@ bailout:
 
 	syslog(LOG_INFO, "Terminating with %u active threads\n", tc - tj);
 	pthread_mutex_lock(&connection_mtx);
-	plist_free(connection_list);
+	connection_list = plist_free(connection_list);
 	pthread_mutex_unlock(&connection_mtx);
 
 	hlist_free(header_list);
