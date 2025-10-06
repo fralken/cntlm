@@ -228,9 +228,9 @@ int scanner_hook(rr_data_const_t request, rr_data_t response, struct auth_s *cre
 
 				free(newreq->method);
 				newreq->method = strdup("POST");
-				hlist_mod(newreq->headers, "Referer", request->url, 1);
-				hlist_mod(newreq->headers, "Content-Type", "application/x-www-form-urlencoded", 1);
-				hlist_mod(newreq->headers, "Content-Length", tmp, 1);
+				newreq->headers = hlist_mod(newreq->headers, "Referer", request->url, 1);
+				newreq->headers = hlist_mod(newreq->headers, "Content-Type", "application/x-www-form-urlencoded", 1);
+				newreq->headers = hlist_mod(newreq->headers, "Content-Length", tmp, 1);
 				free(tmp);
 
 				nc = proxy_connect(credentials, newreq->url, newreq->hostname);

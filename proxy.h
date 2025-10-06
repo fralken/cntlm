@@ -29,7 +29,6 @@ extern int proxy_connect(struct auth_s *credentials, const char* url, const char
 extern int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct auth_s *creds);
 
 extern int parent_add(const char *parent, int port);
-extern int parent_available(void);
 extern void parent_free(void);
 
 #endif /* PROXY_H */
