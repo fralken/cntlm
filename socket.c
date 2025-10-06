@@ -154,7 +154,6 @@ int so_listen(plist_t *list, struct addrinfo *addresses, void *aux) {
 		if (fd < 0) {
 			if (debug)
 				printf("so_listen: new socket: %s\n", strerror(errno));
-			close(fd);
 			continue;
 		}
 

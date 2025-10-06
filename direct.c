@@ -559,7 +559,7 @@ void direct_tunnel(void *thread_data) {
 	sd = host_connect(hostname, port);
 	free(hostname);
 
-	if (sd <= 0) {
+	if (sd < 0) {
 		close(cd);
 		return;
 	}
