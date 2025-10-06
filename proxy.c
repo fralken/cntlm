@@ -187,6 +187,7 @@ void proxylist_free(proxylist_t list, int free_proxy) {
 
 /*
  * Parse proxy parameter and add it to the global list.
+ * Returns the total number of proxies in the list after addition.
  */
 int parent_add(const char *parent, int port) {
 	char *spec;
@@ -234,13 +235,6 @@ int parent_add(const char *parent, int port) {
 }
 
 /*
- * Returns non zero if the global proxy list is not empty.
- */
-int parent_available(void) {
-	return parent_count > 0;
-}
-
-/*
  * Frees the global proxy list.
  */
 void parent_free(void) {
@@ -281,7 +275,7 @@ paclist_t paclist_create(const char *pacp_str) {
 		char *type_str = NULL;
 		char *hostname = NULL;
 		char *port = NULL;
-		proxy_t *proxy;
+		proxy_t *proxy = NULL;
 
 		/* skip whitespace after semicolon */
 		if (*cur_proxy == ' ')
@@ -302,17 +296,16 @@ paclist_t paclist_create(const char *pacp_str) {
 			}
 		}
 
+		pthread_mutex_lock(&parent_mtx);
 		proxylist_t p = parent_list;
 		if (type == PROXY) {
 			int iport = atoi(port);
 			while (p != NULL && !(p->proxy->type == type && p->proxy->port == iport && !strcmp(p->proxy->hostname, hostname)))
 					p = p->next;
 			if (p == NULL) {
-				pthread_mutex_lock(&parent_mtx);
 				parent_add(hostname, iport);
 				proxy = proxylist_get(parent_list, parent_count);
 				plist = proxylist_add(plist, parent_count, proxy);
-				pthread_mutex_unlock(&parent_mtx);
 			}
 		} else { // type == DIRECT
 			while (p != NULL && p->proxy->type != type)
@@ -320,14 +313,11 @@ paclist_t paclist_create(const char *pacp_str) {
 			if (p == NULL) {
 				proxy = (proxy_t *)zmalloc(sizeof(proxy_t));
 				proxy->type = DIRECT;
-				
-				pthread_mutex_lock(&parent_mtx);
-				++parent_count;
-				parent_list = proxylist_add(parent_list, parent_count, proxy);
+				parent_list = proxylist_add(parent_list, ++parent_count, proxy);
 				plist = proxylist_add(plist, parent_count, proxy);
-				pthread_mutex_unlock(&parent_mtx);
 			}
 		}
+		pthread_mutex_unlock(&parent_mtx);
 		if (p != NULL)
 			plist = proxylist_add(plist, p->key, p->proxy);
 
@@ -428,16 +418,18 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
 		 */
 		pthread_mutex_lock(&pac_mtx);
 		pacp_str = pac_find_proxy(url, hostname);
+		paclist = paclist_get(pacp_str);
 		pthread_mutex_unlock(&pac_mtx);
 
-		paclist = paclist_get(pacp_str);
 		proxylist = paclist->proxylist;
 		proxycurr = paclist->proxycurr;
 		proxycount = paclist->count;
 	} else {
+		pthread_mutex_lock(&parent_mtx);
 		proxylist = parent_list;
 		proxycurr = parent_curr;
 		proxycount = parent_count;
+		pthread_mutex_unlock(&parent_mtx);
 	}
 
 	if (proxycurr == 0 && proxylist) {
@@ -445,8 +437,8 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
 	}
 
 	do {
-		pthread_mutex_lock(&parent_mtx);
 		proxy = proxylist_get(proxylist, proxycurr);
+		pthread_mutex_lock(&parent_mtx);
 		if (proxy &&
 			proxy->type == PROXY &&
 			proxy->resolved == 0) {
@@ -499,7 +491,7 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
 			close((int)(list->key));
 			list = tmp;
 		}
-		plist_free(connection_list);
+		connection_list = plist_free(connection_list);
 		pthread_mutex_unlock(&connection_mtx);
 
 		pthread_mutex_lock(&parent_mtx);
@@ -524,7 +516,7 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
  * if auth was required or not from response->code. If not, caller has
  * a full reply to forward to client.
  *
- * Return 0 in case of network error, 1 when proxy replies
+ * Return 0 in case of network error (closes sd in this case), 1 when proxy replies
  *
  * Caller must init & free "request" and "response" (if supplied)
  *
@@ -537,7 +529,6 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 	int len;
 
 	int pretend407 = 0;
-	int rc = 0;
 	size_t bufsize = BUFSIZE;
 	buf = zmalloc(bufsize);
 
@@ -608,7 +599,9 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 
 	if (!headers_send(*sd, auth)) {
 		close(*sd);
-		goto bailout;
+		free_rr_data(&auth);
+		free(buf);
+		return 0;
 	}
 
 	if (debug)
@@ -626,22 +619,25 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 	reset_rr_data(auth);
 	if (!headers_recv(*sd, auth)) {
 		close(*sd);
-		goto bailout;
+		if (!response)
+			free_rr_data(&auth);
+		free(buf);
+		return 0;
 	}
 
 	if (debug)
 		hlist_dump(auth->headers);
-
-	rc = 1;
 
 	/*
 	 * Auth required?
 	 */
 	if (auth->code == 407) {
 		if (!http_body_drop(*sd, auth)) {				// FIXME: if below fails, we should forward what we drop here...
-			rc = 0;
 			close(*sd);
-			goto bailout;
+			if (!response)
+				free_rr_data(&auth);
+			free(buf);
+			return 0;
 		}
 		tmp = hlist_get(auth->headers, "Proxy-Authenticate");
 
@@ -670,13 +666,19 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 						free(challenge);
 						free(tmp);
 						close(*sd);
-						goto bailout;
+						if (!response)
+							free_rr_data(&auth);
+						free(buf);
+						return 0;
 					}
 				} else {
 					syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
 					free(challenge);
 					close(*sd);
-					goto bailout;
+					if (!response)
+						free_rr_data(&auth);
+					free(buf);
+					return 0;
 				}
 
 				free(challenge);
@@ -692,9 +694,11 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 		if (response)
 			response->code = 407;				// See explanation above
 		if (!http_body_drop(*sd, auth)) {
-			rc = 0;
 			close(*sd);
-			goto bailout;
+			if (!response)
+				free_rr_data(&auth);
+			free(buf);
+			return 0;
 		}
 	}
 
@@ -707,16 +711,17 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 		close(*sd);
 		*sd = proxy_connect(credentials, request->url, request->hostname);
 		if (*sd < 0) {
-			rc = 0;
-			goto bailout;
+			if (!response)
+				free_rr_data(&auth);
+			free(buf);
+			return 0;
 		}
 	}
 
-bailout:
 	if (!response)
 		free_rr_data(&auth);
 
 	free(buf);
 
-	return rc;
+	return 1;
 }

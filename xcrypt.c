@@ -741,7 +741,7 @@ void md4_process_bytes (const void *buffer, size_t len, struct md4_ctx *ctx) {
         {
           md4_process_block (ctx->buffer, 64, ctx);
           left_over -= 64;
-          memcpy (ctx->buffer, &ctx->buffer[16], left_over);
+          memmove (ctx->buffer, &ctx->buffer[16], left_over);
         }
       ctx->buflen = left_over;
     }
@@ -1100,7 +1100,7 @@ md5_process_bytes (const void *buffer, size_t len, struct md5_ctx *ctx)
         {
           md5_process_block (ctx->buffer, 64, ctx);
           left_over -= 64;
-          memcpy (ctx->buffer, &ctx->buffer[16], left_over);
+          memmove (ctx->buffer, &ctx->buffer[16], left_over);
         }
       ctx->buflen = left_over;
     }
