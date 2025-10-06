@@ -436,7 +436,7 @@ int chunked_data_send(int dst, int src) {
 		if (dst >= 0)
 			(void) write_wrapper(dst, buf, strlen(buf));
 
-		if (csize && !data_send(dst, src, csize+2)) {
+		if (csize > 0 && !data_send(dst, src, csize+2)) {
 			if (debug)
 				printf("chunked_data_send: aborting, data_send failed\n");
 

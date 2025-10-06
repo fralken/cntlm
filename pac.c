@@ -83,8 +83,8 @@ static duk_ret_t native_myipaddress(duk_context *ctx) {
 char *read_file(const char* filename) {
     FILE    *fd;
     char    *buf;
-    size_t  len;
-    size_t  ret;
+    ssize_t  len;
+    ssize_t  ret;
     
     fd = fopen(filename, "r");
     if(fd == NULL)
@@ -94,7 +94,7 @@ char *read_file(const char* filename) {
     len = ftell(fd);
     fseek(fd, 0L, SEEK_SET);	
 
-    if (len == 0) {
+    if (len <= 0) {
         fclose(fd);
         return NULL;
     }
@@ -106,10 +106,11 @@ char *read_file(const char* filename) {
     }
 
     ret = fread(buf, sizeof(char), len, fd);
-    if (ret < len) {
+    if (ret != len) {
         free(buf);
         buf = NULL;
-    } 
+    }
+
     fclose(fd);
 
     return buf;

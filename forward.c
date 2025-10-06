@@ -497,16 +497,16 @@ bailout:
  * Auth connection "sd" and try to return negotiated CONNECT
  * connection to a remote host:port (thost).
  *
- * Return 1 for success, 0 failure.
+ * Return 1 for success, 0 failure (closes sd in this case).
  */
-int prepare_http_connect(int sd, struct auth_s *credentials, const char *thost) {
+int prepare_http_connect(int *sd, struct auth_s *credentials, const char *thost) {
 	rr_data_t data1;
 	rr_data_t data2;
 	int rc = 0;
 	hlist_t tl;
 	char *pos;
 
-	if (!sd || !thost || !strlen(thost))
+	if (*sd < 0 || !thost || !strlen(thost))
 		return 0;
 
 	data1 = new_rr_data();
@@ -535,7 +535,7 @@ int prepare_http_connect(int sd, struct auth_s *credentials, const char *thost) 
 	if (debug)
 		printf("Starting authentication...\n");
 
-	if (proxy_authenticate(&sd, data1, data2, credentials)) {
+	if (proxy_authenticate(sd, data1, data2, credentials)) {
 		/*
 		 * Let's try final auth step, possibly changing data2->code
 		 */
@@ -544,9 +544,10 @@ int prepare_http_connect(int sd, struct auth_s *credentials, const char *thost) 
 				printf("Sending real request:\n");
 				hlist_dump(data1->headers);
 			}
-			if (!headers_send(sd, data1)) {
+			if (!headers_send(*sd, data1)) {
 				if (debug)
 					printf("Sending request failed!\n");
+				close(*sd);
 				free_rr_data(&data1);
 				free_rr_data(&data2);
 				return rc;
@@ -555,9 +556,10 @@ int prepare_http_connect(int sd, struct auth_s *credentials, const char *thost) 
 			if (debug)
 				printf("\nReading real response:\n");
 			reset_rr_data(data2);
-			if (!headers_recv(sd, data2)) {
+			if (!headers_recv(*sd, data2)) {
 				if (debug)
 					printf("Reading response failed!\n");
+				close(*sd);
 				free_rr_data(&data1);
 				free_rr_data(&data2);
 				return rc;
@@ -607,10 +609,11 @@ int forward_tunnel(void *thread_data) {
 		if (debug)
 			printf("Tunneling to %s for client %d...\n", thost, cd);
 
-		if (prepare_http_connect(sd, tcreds, thost))
+		// if this fails, it closes sd
+		if (prepare_http_connect(&sd, tcreds, thost)) {
 			tunnel(cd, sd);
-
-		close(sd);
+			close(sd);
+		}
 	}
 
 	if (sd != -2) {
@@ -689,6 +692,7 @@ void magic_auth_detect(const char *url) {
 			free_rr_data(&res);
 			free_rr_data(&req);
 			free(host);
+			free(tcreds);
 			return;
 		}
 
@@ -756,6 +760,6 @@ void magic_auth_detect(const char *url) {
 	} else
 		printf("\nWrong credentials, invalid URL or proxy doesn't support NTLM.\n");
 
-	if (host)
-		free(host);
+	free(host);
+	free(tcreds);
 }
