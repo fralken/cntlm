@@ -520,7 +520,7 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
  * if auth was required or not from response->code. If not, caller has
  * a full reply to forward to client.
  *
- * Return 0 in case of network error, 1 when proxy replies
+ * Return 0 in case of network error (closes sd in this case), 1 when proxy replies
  *
  * Caller must init & free "request" and "response" (if supplied)
  *
@@ -673,7 +673,7 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 						if (!response)
 							free_rr_data(&auth);
 						free(buf);
-						return 1;
+						return 0;
 					}
 				} else {
 					syslog(LOG_ERR, "Proxy returning invalid challenge!\n");
@@ -682,7 +682,7 @@ int proxy_authenticate(int *sd, rr_data_t request, rr_data_t response, struct au
 					if (!response)
 						free_rr_data(&auth);
 					free(buf);
-					return 1;
+					return 0;
 				}
 
 				free(challenge);
