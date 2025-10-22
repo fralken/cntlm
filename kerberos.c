@@ -291,8 +291,15 @@ int acquire_kerberos_token(const char* hostname, struct auth_s *credentials,
 		token_size += 4 + 4;
 		if (token_size + 10 + 1 > *bufsize) {
 			// *bufsize must be >= token_size + length of "NEGOTIATE " (10) + null terminator (1)
-			*bufsize = token_size + 10 + 1;
-			*buf = realloc(*buf, *bufsize);
+			int ts = token_size + 10 + 1;
+			char *tmp = realloc(*buf, ts);
+			if (tmp) {
+				*buf = tmp;
+				*bufsize = ts;
+			} else {
+				// if realloc fails we must use the buffer that we have, which is not enough
+				token_size = *bufsize - 10 - 1;
+			}
 		}
 
 		strlcpy(*buf, "NEGOTIATE ", *bufsize);

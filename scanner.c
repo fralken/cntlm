@@ -59,8 +59,6 @@ int scanner_hook(rr_data_const_t request, rr_data_t response, struct auth_s *cre
 	int done = 0;
 	int headers_initiated = 0;
 	int c;
-	long progress = 0;
-	long filesize = 0;
 
 	/*
 	 * Let's limit the responses we examine to an absolute minimum
@@ -110,6 +108,9 @@ int scanner_hook(rr_data_const_t request, rr_data_t response, struct auth_s *cre
 		for (i = 0; i < c && pos[i] != '"'; ++i);
 
 		if (pos[i] == '"') {
+			long progress = 0;
+			long filesize = 0;
+
 			isaid = substr(pos, 0, i);
 			if (debug)
 				printf("scanner_hook: ISA id = %s\n", isaid);
@@ -121,12 +122,12 @@ int scanner_hook(rr_data_const_t request, rr_data_t response, struct auth_s *cre
 
 				c = (int)strlen(line);
 				if (len + c >= bsize) {
-					bsize *= 2;
-					tmp = realloc(buf, bsize);
-					if (tmp == NULL)
+					int ts = bsize * 2;
+					tmp = realloc(buf, ts);
+					if (!tmp)
 						break;
-					else
-						buf = tmp;
+					buf = tmp;
+					bsize = ts;
 				}
 
 				strlcat(buf, line, bsize);

@@ -264,12 +264,12 @@ int so_recvln(int fd, char **buf, int *size) {
 		if (len == *size-1 && c != '\n') {
 			if (debug)
 				printf("so_recvln(%d): realloc %d\n", fd, *size*2);
-			*size *= 2;
-			tmp = realloc(*buf, *size);
+			int ts = *size * 2;
+			tmp = realloc(*buf, ts);
 			if (tmp == NULL)
 				return -1;
-			else
-				*buf = tmp;
+			*buf = tmp;
+			*size = ts;
 		}
 	}
 	(*buf)[len] = 0;
