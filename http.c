@@ -33,6 +33,7 @@
 #include "http.h"
 #include "socket.h"
 #include "ntlm.h"
+#include "ssl.h"
 
 #define BLOCK		2048
 
@@ -81,7 +82,7 @@ char *get_http_header_value(const char *src) {
  * rr_data_t structure.
  * Returns: 1 if OK, 0 in case of socket EOF or other error
  */
-int headers_recv(int fd, rr_data_t data) {
+int headers_recv_io(io_t *io, rr_data_t data) {
 	int i;
 	int bsize;
 	size_t len;
@@ -96,12 +97,10 @@ int headers_recv(int fd, rr_data_t data) {
 	bsize = BUFSIZE;
 	buf = zmalloc(bsize);
 
-	i = so_recvln(fd, &buf, &bsize);
-	if (i <= 0)
-		goto bailout;
+	i = io_recvln(io, &buf, &bsize);
+	if (i <= 0) goto bailout;
 
-	if (debug)
-		printf("HEAD: %s", buf);
+	if (debug) printf("HEAD: %s", buf);
 
 	/*
 	 * Are we reading HTTP request (from client) or response (from server)?
@@ -129,44 +128,24 @@ int headers_recv(int fd, rr_data_t data) {
 		tok = strtok_r(NULL, " ", &s3);
 		if (tok) {
 			ccode = strdup(tok);
-
 			tok += strlen(ccode);
 			while (tok < buf+len && *tok++ == ' ');
-
-			if (strlen(tok))
-				data->msg = strdup(tok);
+			if (strlen(tok)) data->msg = strdup(tok);
 		}
+		if (!data->msg) data->msg = strdup("");
+		if (!ccode || strlen(ccode) != 3 || (data->code = atoi(ccode)) == 0) { i = -2; goto bailout; }
 
-		if (!data->msg)
-			data->msg = strdup("");
-
-		if (!ccode || strlen(ccode) != 3 || (data->code = atoi(ccode)) == 0) {
-			i = -2;
-			goto bailout;
-		}
 	} else if (strstr(orig, " HTTP/") && tok) {
 		data->req = 1;
 		data->empty = 0;
-		data->method = NULL;
-		data->url = NULL;
-		data->rel_url = NULL;
-		data->http = NULL;
-		data->hostname = NULL;
-
 		data->method = strdup(tok);
 
 		tok = strtok_r(NULL, " ", &s3);
-		if (tok)
-			data->url = strdup(tok);
-
+		if (tok) data->url = strdup(tok);
 		tok = strtok_r(NULL, " ", &s3);
-		if (tok)
-			data->http = strdup(tok);
+		if (tok) data->http = strdup(tok);
 
-		if (!data->url || !data->http) {
-			i = -3;
-			goto bailout;
-		}
+		if (!data->url || !data->http) { i = -3; goto bailout; }
 
 		/*
 		 * Let's find out the numeric version of the HTTP version: 09, 10, 11.
@@ -174,15 +153,10 @@ int headers_recv(int fd, rr_data_t data) {
 		 */
 		if ((tok = strchr(data->http, '/')) && strlen(tok) >= 4 && isdigit((u_char)tok[1]) && isdigit((u_char)tok[3])) {
 			data->http_version = (tok[1] - 0x30) * 10 + (tok[3] - 0x30);
-		} else {
-			data->http_version = -1;
-		}
+		} else data->http_version = -1;
 
-		if ((tok = strstr(data->url, "://"))) {
-			tok += 3;
-		} else {
-			tok = data->url;
-		}
+		if ((tok = strstr(data->url, "://"))) tok += 3;
+		else tok = data->url;
 
 		s3 = strchr(tok, '/');
 		if (s3) {
@@ -192,10 +166,8 @@ int headers_recv(int fd, rr_data_t data) {
 			host = substr(tok, 0, (int)strlen(tok));
 			data->rel_url = strdup("/");
 		}
-
 	} else {
-		if (debug)
-			printf("headers_recv: Unknown header (%s).\n", orig);
+		if (debug) printf("headers_recv_io: Unknown header (%s).\n", orig);
 		i = -4;
 		goto bailout;
 	}
@@ -204,7 +176,7 @@ int headers_recv(int fd, rr_data_t data) {
 	 * Read in all headers, do not touch any possible HTTP body
 	 */
 	do {
-		i = so_recvln(fd, &buf, &bsize);
+		i = io_recvln(io, &buf, &bsize);
 		trimr(buf);
 		if (i > 0 && is_http_header(buf)) {
 			data->headers = hlist_add(data->headers, get_http_header_name(buf), get_http_header_value(buf), HLIST_NOALLOC, HLIST_NOALLOC);
@@ -219,20 +191,16 @@ int headers_recv(int fd, rr_data_t data) {
 			if (!hlist_get(data->headers, "Host"))
 				data->headers = hlist_add(data->headers, "Host", host, HLIST_ALLOC, HLIST_ALLOC);
 		} else {
-			if (debug)
-				printf("headers_recv: no host name (%s)\n", orig);
+			if (debug) printf("headers_recv_io: no host name (%s)\n", orig);
 			i = -6;
 			goto bailout;
 		}
-
 
 		if (host[0] == '[') {
 			tok = strchr(host, ']');
 			*tok = 0;
 			data->hostname = strdup(host+1);
-			if (*(tok+1) == ':') {
-				data->port = atoi(tok+2);
-			}
+			if (*(tok+1) == ':') data->port = atoi(tok+2);
 		} else if ((tok = strchr(host, ':'))) {
 			*tok = 0;
 			data->hostname = strdup(host);
@@ -242,18 +210,13 @@ int headers_recv(int fd, rr_data_t data) {
 		}
 
 		if (!data->port) {
-			if (!strncasecmp(data->url, "https", 5))
-				data->port = 443;
-			else
-				data->port = 80;
+			if (!strncasecmp(data->url, "https", 5)) data->port = 443;
+			else data->port = 80;
 		}
 
 		assert(data != NULL);
 		assert(data->hostname != NULL);
-		if (!strlen(data->hostname) || !data->port) {
-			i = -5;
-			goto bailout;
-		}
+		if (!strlen(data->hostname) || !data->port) { i = -5; goto bailout; }
 	}
 
 bailout:
@@ -263,23 +226,31 @@ bailout:
 	free(buf);
 
 	if (i <= 0) {
-		if (debug)
-			printf("headers_recv: fd %d error %d\n", fd, i);
+		if (debug) printf("headers_recv_io: error %d\n", i);
 		return 0;
 	}
-
 	return 1;
+}
+
+int headers_recv(int fd, rr_data_t data) {
+	io_t *io = io_from_fd(fd);
+	if (!io) return 0;
+	int rc = headers_recv_io(io, data);
+	free(io);
+	return rc;
 }
 
 /*
  * Send HTTP request/response to the given socket based on what's in "data".
  * Returns: 1 if OK, 0 in case of socket error
  */
-int headers_send(int fd, rr_data_const_t data) {
+
+/* serialize headers/request into buffer (caller frees) */
+int headers_serialize(rr_data_const_t data, char **outbuf, size_t *outlen) {
 	hlist_const_t t;
-	char *buf;
-	size_t i;
 	size_t len;
+
+	if (!data || !outbuf || !outlen) return 0;
 
 	/*
 	 * First compute required buffer size (avoid realloc, etc)
@@ -287,7 +258,7 @@ int headers_send(int fd, rr_data_const_t data) {
 	if (data->req)
 		len = 20 + strlen(data->method) + strlen(data->url) + strlen(data->http);
 	else
-		len = 20 + strlen(data->http) + strlen(data->msg);
+		len = 20 + strlen(data->http) + strlen(data->msg ? data->msg : "");
 
 	t = data->headers;
 	while (t) {
@@ -298,49 +269,60 @@ int headers_send(int fd, rr_data_const_t data) {
 	/*
 	 * We know how much memory we need now...
 	 */
-	const size_t buf_len = len;
-	buf = zmalloc(buf_len);
+	char *buf = zmalloc(len);
+	if (!buf) return 0;
 
 	/*
 	 * Prepare the first request/response line
 	 */
-	len = 0;
+	size_t off = 0;
 	if (data->req)
-		len = snprintf(buf, buf_len, "%s %s %s\r\n", data->method, data->url, data->http);
+		off = snprintf(buf, len, "%s %s %s\r\n", data->method, data->url, data->http);
 	else if (!data->skip_http)
-		len = snprintf(buf, buf_len, "%s %03d %s\r\n", data->http, data->code, data->msg);
+		off = snprintf(buf, len, "%s %03d %s\r\n", data->http, data->code, data->msg ? data->msg : "");
 
 	/*
 	 * Now add all headers.
 	 */
 	t = data->headers;
 	while (t) {
-		len += snprintf(buf+len, buf_len - len, "%s: %s\r\n", t->key, t->value);
+		off += snprintf(buf+off, len - off, "%s: %s\r\n", t->key, t->value);
 		t = t->next;
 	}
 
 	/*
 	 * Terminate headers
 	 */
-	strlcat(buf, "\r\n", buf_len);
+	strlcat(buf, "\r\n", len);
+
+	*outbuf = buf;
+	*outlen = off + 2;
+	return 1;
+}
+
+int headers_send_io(io_t *io, rr_data_const_t data) {
+	char *buf = NULL;
+	size_t len = 0;
+	if (!headers_serialize(data, &buf, &len)) return 0;
 
 	/*
 	 * Flush it all down the toilet
 	 */
-	if (!so_closed(fd))
-		i = write_wrapper(fd, buf, len+2);
-	else
-		i = -999;
-
+	ssize_t wrote = io_write_all(io, buf, len);
 	free(buf);
-
-	if (i <= 0 || i != len+2) {
-		if (debug)
-			printf("headers_send: fd %d warning %zu (connection closed)\n", fd, i);
+	if (wrote != (ssize_t)len) {
+		if (debug) printf("headers_send_io: warning wrote %zd != %zu\n", wrote, len);
 		return 0;
 	}
-
 	return 1;
+}
+
+int headers_send(int fd, rr_data_const_t data) {
+	io_t *io = io_from_fd(fd);
+	if (!io) return 0;
+	int rc = headers_send_io(io, data);
+	free(io); /* io_from_fd doesn't own fd, just free wrapper */
+	return rc;
 }
 
 /*
@@ -711,130 +693,79 @@ int http_parse_basic(hlist_const_t headers, const char *header, struct auth_s *t
  * The caller is responsible to free(*outbuf).
  * Returns 1 on success, 0 on failure.
  */
-int http_read_body(int fd, rr_data_const_t response, char **outbuf, size_t *outlen) {
+static int http_read_body_io(io_t *io, rr_data_const_t response, char **outbuf, size_t *outlen) {
 	length_t bodylen;
 	char *buf = NULL;
 	ssize_t alloc = 0;
 	ssize_t filled = 0;
 
-	if (!outbuf || !outlen || !response)
-		return 0;
-
-	*outbuf = NULL;
-	*outlen = 0;
+	if (!outbuf || !outlen || !response) return 0;
+	*outbuf = NULL; *outlen = 0;
 
 	bodylen = http_has_body(NULL, response);
 	if (!bodylen) {
-		// no body
-		*outbuf = zmalloc(1);
-		*outlen = 0;
-		return 1;
+		*outbuf = zmalloc(1); *outlen = 0; return 1;
 	}
 
 	if (hlist_subcmp(response->headers, "Transfer-Encoding", "chunked")) {
-		/* read chunked body by reading lines and chunks from fd */
 		int bsize = BUFSIZE;
 		char *line = zmalloc(bsize);
 		char *err = NULL;
 		long csize;
 		do {
-			int r = so_recvln(fd, &line, &bsize);
-			if (r <= 0) {
-				free(line);
-				free(buf);
-				return 0;
-			}
+			int r = io_recvln(io, &line, &bsize);
+			if (r <= 0) { free(line); free(buf); return 0; }
 			trimr(line);
 			csize = strtol(line, &err, 16);
-			if (!isspace((u_char)*err) && *err != ';' && *err != '\0') {
-				free(line);
-				free(buf);
-				return 0;
-			}
+			if (!isspace((u_char)*err) && *err != ';' && *err != '\0') { free(line); free(buf); return 0; }
 			if (csize > 0) {
-				// ensure capacity
 				if (filled + csize > alloc) {
 					alloc = (filled + csize) * 2;
 					char* tmpbuf = realloc(buf, alloc);
-					if (!tmpbuf) {
-						free(line);
-						free(buf);
-						return 0;
-					}
+					if (!tmpbuf) { free(line); free(buf); return 0; }
 					buf = tmpbuf;
 				}
-				// read csize bytes
 				length_t need = csize;
 				while (need > 0) {
-					size_t toread = (need > BLOCK ? BLOCK : (size_t)need);
-					ssize_t got = read(fd, buf + filled, toread);
-					if (got <= 0) {
-						free(line);
-						free(buf);
-						return 0;
-					}
+					int toread = (need > BLOCK ? BLOCK : (int)need);
+					int got = (int)io_read(io, buf + filled, toread);
+					if (got <= 0) { free(line); free(buf); return 0; }
 					filled += got;
 					need -= got;
 				}
-				// read and discard CRLF after chunk
 				char crlf[2];
-				if (read(fd, crlf, 2) != 2) {
-					free(line);
-					free(buf);
-					return 0;
-				}
+				if (io_read(io, crlf, 2) != 2) { free(line); free(buf); return 0; }
 			}
 		} while (csize != 0);
-
-		// read possible trailer headers until empty line
 		do {
-			int r = so_recvln(fd, &line, &bsize);
-			if (r <= 0) {
-				free(line);
-				free(buf);
-				return 0;
-			}
+			int r = io_recvln(io, &line, &bsize);
+			if (r <= 0) { free(line); free(buf); return 0; }
 		} while (line[0] != '\r' && line[0] != '\n');
-
 		free(line);
 	} else if (bodylen == -1) {
-		/* read until EOF */
-		buf = NULL;
-		alloc = 0;
-		filled = 0;
+		buf = NULL; alloc = 0; filled = 0;
 		char tmp[BLOCK];
-		ssize_t r;
-		while ((r = read(fd, tmp, BLOCK)) > 0) {
+		int r;
+		while ((r = (int)io_read(io, tmp, BLOCK)) > 0) {
 			if (filled + r >= alloc) {
 				alloc = (alloc == 0) ? r + 1 : alloc * 2;
 				char* tmpbuf = realloc(buf, alloc);
-				if (!tmpbuf) {
-					free(buf);
-					return 0;
-				}
+				if (!tmpbuf) { free(buf); return 0; }
 				buf = tmpbuf;
 			}
 			memcpy(buf + filled, tmp, r);
 			filled += r;
-			buf[filled] = '\0';
 		}
-		if (r < 0) {
-			free(buf);
-			return 0;
-		}
+		if (r < 0) { free(buf); return 0; }
 	} else {
-		/* fixed length */
 		if (bodylen > 0) {
 			buf = zmalloc(bodylen+1);
 			length_t need = bodylen;
 			size_t pos = 0;
 			while (need > 0) {
 				size_t toread = (need > BLOCK ? BLOCK : (size_t)need);
-				ssize_t got = read(fd, buf + pos, toread);
-				if (got <= 0) {
-					free(buf);
-					return 0;
-				}
+				ssize_t got = io_read(io, buf + pos, toread);
+				if (got <= 0) { free(buf); return 0; }
 				pos += got;
 				need -= got;
 			}
@@ -845,72 +776,40 @@ int http_read_body(int fd, rr_data_const_t response, char **outbuf, size_t *outl
 		}
 	}
 
-	// finalize buffer
-	if (buf == NULL) {
-		buf = zmalloc(1);
-		filled = 0;
-	}
-
+	if (buf == NULL) { buf = zmalloc(1); filled = 0; }
 	*outbuf = buf;
 	*outlen = filled;
-
 	return 1;
 }
 
 /*
  * Minimal HTTP GET fetcher to retrieve a file from URL into memory.
- * Supports only http scheme (no HTTPS) and basic parsing of host:port/path.
+ * Supports http and https scheme and basic parsing of host:port/path.
  * The function allocates *outbuf and sets *outlen. Caller must free(*outbuf).
  * If outcode != NULL, the HTTP response status code will be stored there
  * (or -1 on protocol/error).
  * Returns 1 on successful fetch+read, 0 on error.
  */
 int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
-	if (!url || !outbuf || !outlen)
-		return 0;
+	if (!url || !outbuf || !outlen) return 0;
+	if (outcode) *outcode = -1;
 
-	if (outcode)
-		*outcode = -1;
-
-	// Basic parse: expect http://host[:port]/path
 	const char *p = url;
-	if (strncasecmp(p, "http://", 7) == 0)
-		p += 7;
-	else
-		return 0; // only http supported for now
+	int is_https = 0;
+	if (strncasecmp(p, "http://", 7) == 0) p += 7;
+	else if (strncasecmp(p, "https://", 8) == 0) { is_https = 1; p += 8; }
+	else return 0;
 
 	char *host = NULL;
-	int port = 80;
+	int port = is_https ? 443 : 80;
 	const char *path = strchr(p, '/');
-	if (path) {
-		host = substr(p, 0, (int)(path - p));
-	} else {
-		host = strdup(p);
-		path = "/";
-	}
+	if (path) host = substr(p, 0, (int)(path - p));
+	else { host = strdup(p); path = "/"; }
 
-	// split port
 	char *colon = strchr(host, ':');
-	if (colon) {
-		*colon = '\0';
-		port = atoi(colon+1);
-		if (port == 0) port = 80;
-	}
+	if (colon) { *colon = '\0'; port = atoi(colon+1); if (port == 0) port = is_https ? 443 : 80; }
 
-	struct addrinfo *addresses = NULL;
-	if (!so_resolv(&addresses, host, port)) {
-		free(host);
-		return 0;
-	}
-
-	int sd = so_connect(addresses);
-	freeaddrinfo(addresses);
-	if (sd < 0) {
-		free(host);
-		return 0;
-	}
-
-	// Build simple GET request
+	/* Common request construction */
 	rr_data_t req = new_rr_data();
 	req->req = 1;
 	req->method = strdup("GET");
@@ -920,41 +819,44 @@ int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
 	req->headers = hlist_add(req->headers, "User-Agent", "cntlm-fetch/1.0", HLIST_ALLOC, HLIST_ALLOC);
 	req->headers = hlist_add(req->headers, "Connection", "close", HLIST_ALLOC, HLIST_ALLOC);
 
-	// send headers
-	if (!headers_send(sd, req)) {
-		free_rr_data(&req);
-		close(sd);
-		free(host);
-		return 0;
-	}
-	free_rr_data(&req);
-	free(host);
-
-	// read response headers
-	rr_data_t res = new_rr_data();
-	if (!headers_recv(sd, res)) {
-		free_rr_data(&res);
-		close(sd);
-		return 0;
-	}
-
-	/* expose HTTP status code to caller */
-	if (outcode)
-		*outcode = res->code;
-
-	// read body into memory
 	char *body = NULL;
 	size_t bodylen = 0;
-	if (!http_read_body(sd, res, &body, &bodylen)) {
-		free_rr_data(&res);
-		close(sd);
-		return 0;
+	io_t *io = NULL;
+
+	if (!is_https) {
+		/* plain socket path: resolve/connect, use owned fd wrapper */
+		struct addrinfo *addresses = NULL;
+		if (!so_resolv(&addresses, host, port)) { free_rr_data(&req); free(host); return 0; }
+		int sd = so_connect(addresses);
+		freeaddrinfo(addresses);
+		if (sd < 0) { free_rr_data(&req); free(host); return 0; }
+
+		io = io_from_fd(sd);
+		if (!io) { close(sd); free_rr_data(&req); free(host); return 0; }
+	} else {
+		/* TLS: connect via ssl abstraction, wrap into io, reuse same logic */
+		ssl_conn_t *s = ssl_connect_host(host, port);
+		if (!s) { free_rr_data(&req); free(host); return 0; }
+
+		io = io_from_ssl(s);
+		if (!io) { ssl_close_conn(s); free_rr_data(&req); free(host); return 0; }
 	}
+
+	if (!headers_send_io(io, req)) { io_close(io); free_rr_data(&req); free(host); return 0; }
+	free_rr_data(&req);
+
+	rr_data_t res = new_rr_data();
+	if (!headers_recv_io(io, res)) { free_rr_data(&res); io_close(io); free(host); return 0; }
+	if (outcode) *outcode = res->code;
+
+	if (!http_read_body_io(io, res, &body, &bodylen)) { free_rr_data(&res); io_close(io); free(host); return 0; }
 	free_rr_data(&res);
-	close(sd);
+
+	io_close(io);
+
+	free(host);
 
 	*outbuf = body;
 	*outlen = bodylen;
-
 	return 1;
 }

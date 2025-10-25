@@ -1368,7 +1368,7 @@ int main(int argc, char **argv) {
 
 	/* Start Pac engine if pac_file available */
 	/* If pac_file looks like an HTTP URL, defer fetch until first incoming connection */
-	if (pac && strncasecmp(pac_file, "http://", 7) != 0) {
+	if (pac && strncasecmp(pac_file, "http://", 7) != 0 && strncasecmp(pac_file, "https://", 8) != 0) {
 		/* Treat as local file: resolve and load immediately */
 		char resolved[PATH_MAX] = {0};
 		if (!realpath(pac_file, resolved) && errno != ENOENT) {
