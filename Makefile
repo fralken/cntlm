@@ -25,12 +25,16 @@ LDFLAGS		:= -lpthread -lm $(OSLDFLAGS)
 CYGWIN_REQS	:= cygwin1.dll cygrunsrv.exe
 
 ifeq ($(OS),Darwin)
-	ifndef ARCH
-		ARCH := $(shell uname -m)
-	endif
-	CFLAGS += -arch $(ARCH)
+    ifndef ARCH
+        ARCH := $(shell uname -m)
+    endif
+    CFLAGS += -arch $(ARCH)
+# Blocks are used with Network.framework handlers
+    CFLAGS += -fblocks
 # Change binary directory for macOS
-	BINDIR := $(DESTDIR)$(PREFIX)/bin
+    LDFLAGS += -framework Network -framework CoreFoundation
+else
+    LDFLAGS += -lssl -lcrypto
 endif
 
 ifeq ($(CC),gcc)
@@ -81,7 +85,7 @@ else
 	CFLAGS	+= -O3
 endif
 
-OBJS=main.o utils.o ntlm.o xcrypt.o config.o socket.o acl.o auth.o http.o forward.o direct.o scanner.o pages.o proxy.o pac.o duktape.o
+OBJS=main.o utils.o ntlm.o xcrypt.o config.o socket.o acl.o auth.o http.o forward.o direct.o scanner.o pages.o proxy.o pac.o ssl.o duktape.o
 
 CONFIG_GSS=$(shell grep -c "config_gss 1" config/config.h)
 ifeq ($(CONFIG_GSS),1)
