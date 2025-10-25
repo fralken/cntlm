@@ -29,10 +29,8 @@ ifeq ($(OS),Darwin)
         ARCH := $(shell uname -m)
     endif
     CFLAGS += -arch $(ARCH)
-# Blocks are used with Network.framework handlers
-    CFLAGS += -fblocks
 # Change binary directory for macOS
-    LDFLAGS += -framework Network -framework CoreFoundation
+    LDFLAGS += -framework CFNetwork -framework CoreFoundation
 else
     LDFLAGS += -lssl -lcrypto
 endif

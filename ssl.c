@@ -17,133 +17,103 @@
 #include <errno.h>
 
 #ifdef __APPLE__
-/* macOS Network.framework implementation */
-#include <Network/Network.h>
-#include <dispatch/dispatch.h>
+/* macOS CFStream (CFNetwork) TLS implementation - C API, no Blocks, no Security.framework */
+#include <CoreFoundation/CoreFoundation.h>
+#include <CFNetwork/CFNetwork.h>
 
 struct ssl_conn {
-    nw_connection_t conn;
-    dispatch_queue_t queue;
+    CFReadStreamRef  rstream;
+    CFWriteStreamRef wstream;
 };
 
-/* funzione nw_noop_state_handler rimossa (non usata) */
-
+/* create TLS streams and perform handshake (blocking, short timeout) */
 ssl_conn_t *ssl_connect_host(const char *host, int port) {
-    ssl_conn_t *c = NULL;
-    char portbuf[16];
-    snprintf(portbuf, sizeof(portbuf), "%d", port);
+    if (!host) return NULL;
 
-    c = zmalloc(sizeof(*c));
-    if (!c) return NULL;
+    CFStringRef cfHost = CFStringCreateWithCString(NULL, host, kCFStringEncodingUTF8);
+    if (!cfHost) return NULL;
 
-    c->queue = dispatch_queue_create("cntlm.ssl.queue", DISPATCH_QUEUE_SERIAL);
-    if (!c->queue) { free(c); return NULL; }
-
-    nw_endpoint_t ep = nw_endpoint_create_host(host, portbuf);
-    /* provide two empty configuration blocks to satisfy non-null requirements */
-    nw_parameters_t params = nw_parameters_create_secure_tcp(
-        ^(nw_protocol_options_t tls_options){ (void)tls_options; },
-        ^(nw_protocol_options_t tcp_options){ (void)tcp_options; }
-    );
-    c->conn = nw_connection_create(ep, params);
-    nw_release(ep);
-    nw_release(params);
-
-    if (!c->conn) {
-        dispatch_release(c->queue);
-        free(c);
+    CFReadStreamRef r = NULL;
+    CFWriteStreamRef w = NULL;
+    CFStreamCreatePairWithSocketToHost(NULL, cfHost, (UInt32)port, &r, &w);
+    if (!r || !w) {
+        if (r) CFRelease(r);
+        if (w) CFRelease(w);
+        CFRelease(cfHost);
         return NULL;
     }
 
-    nw_connection_set_queue(c->conn, c->queue);
-    /* use a semaphore + state variable because nw_connection_get_state
-     * is not available in all SDKs. The handler stores the last state
-     * and signals the semaphore when connection transitions to a final state.
-     */
-    __block nw_connection_state_t last_state = nw_connection_state_invalid;
-    dispatch_semaphore_t stsem = dispatch_semaphore_create(0);
-    nw_connection_set_state_changed_handler(c->conn, ^(nw_connection_state_t state, nw_error_t error) {
-        /* mark error as used to silence -Wunused-parameter */
-        (void)error;
-        last_state = state;
-        if (state == nw_connection_state_ready ||
-            state == nw_connection_state_failed ||
-            state == nw_connection_state_cancelled) {
-            dispatch_semaphore_signal(stsem);
-        }
-    });
-    nw_connection_start(c->conn);
+    /* SSL settings: validate peer using host name */
+    CFMutableDictionaryRef sslSettings = CFDictionaryCreateMutable(NULL, 0,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (sslSettings) {
+        CFDictionaryAddValue(sslSettings, kCFStreamSSLPeerName, cfHost);
+        /* leave other SSL options to defaults (system trust) */
+        CFReadStreamSetProperty(r, kCFStreamPropertySSLSettings, sslSettings);
+        CFWriteStreamSetProperty(w, kCFStreamPropertySSLSettings, sslSettings);
+        CFRelease(sslSettings);
+    }
 
-    /* wait (up to ~2s) for ready/failed */
+    /* open streams */
+    if (!CFReadStreamOpen(r) || !CFWriteStreamOpen(w)) {
+        CFReadStreamClose(r); CFWriteStreamClose(w);
+        CFRelease(r); CFRelease(w); CFRelease(cfHost);
+        return NULL;
+    }
+
+    /* wait briefly for stream to become open */
     int ready = 0;
-    const long attempts = 200;
-    for (long i = 0; i < attempts; ++i) {
-        if (dispatch_semaphore_wait(stsem, dispatch_time(DISPATCH_TIME_NOW, 10000 * NSEC_PER_USEC)) == 0) {
-            if (last_state == nw_connection_state_ready) ready = 1;
-            break;
-        }
-        /* small sleep if semaphore wasn't signaled */
+    for (int i = 0; i < 200; ++i) { /* ~2s total */
+        CFStreamStatus rs = CFReadStreamGetStatus(r);
+        CFStreamStatus ws = CFWriteStreamGetStatus(w);
+        if (rs == kCFStreamStatusOpen && ws == kCFStreamStatusOpen) { ready = 1; break; }
+        if (rs == kCFStreamStatusError || ws == kCFStreamStatusError) break;
         usleep(10000);
     }
-    dispatch_release(stsem);
+    CFRelease(cfHost);
     if (!ready) {
-        nw_connection_cancel(c->conn);
-        nw_release(c->conn);
-        dispatch_release(c->queue);
-        free(c);
+        CFReadStreamClose(r); CFWriteStreamClose(w);
+        CFRelease(r); CFRelease(w);
         return NULL;
     }
 
+    ssl_conn_t *c = zmalloc(sizeof(*c));
+    if (!c) { CFReadStreamClose(r); CFWriteStreamClose(w); CFRelease(r); CFRelease(w); return NULL; }
+    c->rstream = r;
+    c->wstream = w;
     return c;
 }
 
 ssize_t ssl_write_all(ssl_conn_t *c, const void *buf, size_t len) {
-    if (!c || !buf) return -1;
-    __block ssize_t sent = -1;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    /* create dispatch_data for content and send it */
-    dispatch_data_t data = dispatch_data_create(buf, len, NULL, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-    nw_connection_send(c->conn, data, NW_CONNECTION_DEFAULT_MESSAGE_CONTEXT, true, ^(nw_error_t error) {
-        (void)error;
-        if (error) sent = -1;
-        else sent = (ssize_t)len;
-        dispatch_semaphore_signal(sem);
-    });
-    if (data) dispatch_release(data);
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-    dispatch_release(sem);
-    return sent;
-}
- 
-ssize_t ssl_read(ssl_conn_t *c, void *buf, size_t len) {
-    if (!c || !buf) return -1;
-    __block ssize_t got = -1;
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    nw_connection_receive(c->conn, 1, len, ^(dispatch_data_t content, nw_content_context_t ctx, bool is_complete, nw_error_t error) {
-        (void)ctx; (void)is_complete; (void)error;
-        if (error) {
-            got = -1;
-        } else if (content == NULL) {
-            got = 0;
-        } else {
-            size_t s = dispatch_data_get_size(content);
-            if (s > 0) {
-                dispatch_data_apply(content, ^bool(dispatch_data_t region, size_t offset, const void *buffer, size_t size) {
-                    /* mark unused params to avoid warnings */
-                    (void)region; (void)offset;
-                    memcpy(buf, buffer, size);
-                    return false;
-                });
-                got = (ssize_t)s;
-            } else {
-                got = 0;
-            }
+    if (!c || !c->wstream || !buf || len == 0) return -1;
+    size_t written = 0;
+    while (written < len) {
+        CFIndex w = CFWriteStreamWrite(c->wstream, (const UInt8 *)buf + written, (CFIndex)(len - written));
+        if (w < 0) return -1;
+        if (w == 0) {
+            /* check stream status for error/closed */
+            CFStreamStatus st = CFWriteStreamGetStatus(c->wstream);
+            if (st == kCFStreamStatusAtEnd || st == kCFStreamStatusError) return -1;
+            /* small wait and retry */
+            usleep(10000);
+            continue;
         }
-        dispatch_semaphore_signal(sem);
-    });
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
-    dispatch_release(sem);
-    return got;
+        written += (size_t)w;
+    }
+    return (ssize_t)written;
+}
+
+ssize_t ssl_read(ssl_conn_t *c, void *buf, size_t len) {
+    if (!c || !c->rstream || !buf || len == 0) return -1;
+    CFIndex r = CFReadStreamRead(c->rstream, (UInt8 *)buf, (CFIndex)len);
+    if (r < 0) return -1;
+    if (r == 0) {
+        CFStreamStatus st = CFReadStreamGetStatus(c->rstream);
+        if (st == kCFStreamStatusAtEnd || st == kCFStreamStatusClosed) return 0;
+        /* Would block / no data available */
+        return 0;
+    }
+    return (ssize_t)r;
 }
 
 int ssl_recvln(ssl_conn_t *c, char **buf, int *bsize) {
@@ -151,12 +121,11 @@ int ssl_recvln(ssl_conn_t *c, char **buf, int *bsize) {
     int pos = 0;
     char ch;
     int r;
-
     if (!*buf || *bsize <= 0) return -1;
-
     while (1) {
         r = (int)ssl_read(c, &ch, 1);
-        if (r <= 0) return r;
+        if (r < 0) return -1;
+        if (r == 0) return 0;
         if (pos + 2 > *bsize) {
             int nb = (*bsize) * 2;
             char *n = realloc(*buf, nb);
@@ -173,14 +142,10 @@ int ssl_recvln(ssl_conn_t *c, char **buf, int *bsize) {
 
 void ssl_close_conn(ssl_conn_t *c) {
     if (!c) return;
-    if (c->conn) {
-        nw_connection_cancel(c->conn);
-        nw_release(c->conn);
-    }
-    if (c->queue) dispatch_release(c->queue);
+    if (c->rstream) { CFReadStreamClose(c->rstream); CFRelease(c->rstream); }
+    if (c->wstream) { CFWriteStreamClose(c->wstream); CFRelease(c->wstream); }
     free(c);
 }
-
 #else /* OpenSSL path for Linux/others */
 
 #include <openssl/ssl.h>
