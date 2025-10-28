@@ -296,17 +296,16 @@ paclist_t paclist_create(const char *pacp_str) {
 			}
 		}
 
+		pthread_mutex_lock(&parent_mtx);
 		proxylist_t p = parent_list;
 		if (type == PROXY) {
 			int iport = atoi(port);
 			while (p != NULL && !(p->proxy->type == type && p->proxy->port == iport && !strcmp(p->proxy->hostname, hostname)))
 					p = p->next;
 			if (p == NULL) {
-				pthread_mutex_lock(&parent_mtx);
 				parent_add(hostname, iport);
 				proxy = proxylist_get(parent_list, parent_count);
 				plist = proxylist_add(plist, parent_count, proxy);
-				pthread_mutex_unlock(&parent_mtx);
 			}
 		} else { // type == DIRECT
 			while (p != NULL && p->proxy->type != type)
@@ -315,15 +314,14 @@ paclist_t paclist_create(const char *pacp_str) {
 				proxy = (proxy_t *)zmalloc(sizeof(proxy_t));
 				proxy->type = DIRECT;
 				
-				pthread_mutex_lock(&parent_mtx);
 				++parent_count;
 				parent_list = proxylist_add(parent_list, parent_count, proxy);
 				plist = proxylist_add(plist, parent_count, proxy);
-				pthread_mutex_unlock(&parent_mtx);
 			}
 		}
 		if (p != NULL)
 			plist = proxylist_add(plist, p->key, p->proxy);
+		pthread_mutex_unlock(&parent_mtx);
 
 		++plist_count;
 		cur_proxy = strsep(&pacp_tmp, ";"); /* get next proxy */
