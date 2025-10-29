@@ -533,7 +533,7 @@ void *socks5_thread(void *thread_data) {
 		 */
 		uname = zmalloc(c+1);
 		r = read(cd, uname, c+1);
-		if (r != c+1 || (ssize_t)uname[c] < 0 || (ssize_t)uname[c] > 255) {
+		if (r != c+1) {
 			free(uname);
 			close(cd);
 			threads_list_add(pthread_self());
@@ -542,6 +542,12 @@ void *socks5_thread(void *thread_data) {
 		i = uname[c]; // PLEN
 		uname[c] = 0;
 		c = (ssize_t)i;
+		if (c <= 0 || c > 255) {
+			free(uname);
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
+		}
 
 		/*
 		 * Read pass
