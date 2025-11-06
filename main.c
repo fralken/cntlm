@@ -303,6 +303,17 @@ int fetch_pac_file(const char* pac_file) {
 }
 
 /*
+ * Add thread to the "threads to join" list.
+ */
+void threads_list_add(pthread_t thread_id) {
+	if (!serialize) {
+		pthread_mutex_lock(&threads_mtx);
+		threads_list = plist_add(threads_list, (unsigned long)thread_id, NULL);
+		pthread_mutex_unlock(&threads_mtx);
+	}
+}
+
+/*
  * Proxy thread - decide between direct and forward based on NoProxy
  * TODO: update
  */
@@ -363,12 +374,7 @@ void *proxy_thread(void *thread_data) {
 	/*
 	 * Add ourself to the "threads to join" list.
 	 */
-	if (!serialize) {
-		pthread_mutex_lock(&threads_mtx);
-		pthread_t thread_id = pthread_self();
-		threads_list = plist_add(threads_list, (unsigned long)thread_id, NULL);
-		pthread_mutex_unlock(&threads_mtx);
-	}
+	threads_list_add(pthread_self());
 
 	return NULL;
 }
@@ -402,12 +408,7 @@ void *tunnel_thread(void *thread_data) {
 	/*
 	 * Add ourself to the "threads to join" list.
 	 */
-	if (!serialize) {
-		pthread_mutex_lock(&threads_mtx);
-		pthread_t thread_id = pthread_self();
-		threads_list = plist_add(threads_list, (unsigned long)thread_id, NULL);
-		pthread_mutex_unlock(&threads_mtx);
-	}
+	threads_list_add(pthread_self());
 
 	return NULL;
 }
@@ -419,25 +420,26 @@ void *socks5_thread(void *thread_data) {
 	static const uint8_t SOCKS5_AUTH_NO_AUTHENTICATION_REQUIRED = 0x00;
 	static const uint8_t SOCKS5_AUTH_USERNAME_PASSWORD = 0x02;
 	static const uint8_t SOCKS5_AUTH_NO_ACCEPTABLE_METHODS = 0xFF;
-	char *thost;
-	char *tport;
-	char *uname;
-	char *upass;
+	char *thost = NULL;
+	char *tport = NULL;
+	char *uname = NULL;
+	char *upass = NULL;
 	unsigned short port;
 	int ver;
 	ssize_t r;
-	int c;
-	int i;
+	ssize_t c;
 	ssize_t w;
+	ssize_t i;
+	int s;
 
 	struct auth_s *tcreds = NULL;
-	unsigned char *bs = NULL;
-	unsigned char *auths = NULL;
+	uint8_t *auths = NULL;
 	unsigned char *addr = NULL;
-	char found = -1;
+	int8_t found = -1;
 	int sd = -1;
 	int open = !hlist_count(users_list);
 
+	uint8_t bs[10] = {0};
 	int cd = ((struct thread_arg_s *)thread_data)->fd;
 	char saddr[INET6_ADDRSTRLEN] = {0};
 	INET_NTOP(&((struct thread_arg_s *)thread_data)->addr, saddr, INET6_ADDRSTRLEN);
@@ -446,21 +448,25 @@ void *socks5_thread(void *thread_data) {
 	/*
 	 * Check client's version, possibly fuck'em
 	 */
-	bs = (unsigned char *)zmalloc(10);
-	thost = zmalloc(HOST_BUFSIZE);
-	tport = zmalloc(MINIBUF_SIZE);
 	r = read(cd, bs, 2);
-	if (r != 2 || bs[0] != 5)
-		goto bailout;
+	if (r != 2 || bs[0] != (uint8_t)0x05 || (ssize_t)bs[1] == 0) {
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
+	}
 
 	/*
 	 * Read offered auth schemes
 	 */
-	c = bs[1];
-	auths = (unsigned char *)zmalloc(c+1);
+	c = (ssize_t)bs[1];
+	auths = (unsigned char *)zmalloc(c);
 	r = read(cd, auths, c);
-	if (r != c)
-		goto bailout;
+	if (r != c) {
+		free(auths);
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
+	}
 
 	/*
 	 * Are we wide open and client is OK with no auth?
@@ -483,6 +489,7 @@ void *socks5_thread(void *thread_data) {
 			}
 		}
 	}
+	free(auths);
 
 	/*
 	 * If not open and no auth offered or open and auth requested, fuck'em
@@ -492,7 +499,9 @@ void *socks5_thread(void *thread_data) {
 		bs[0] = 5;
 		bs[1] = SOCKS5_AUTH_NO_ACCEPTABLE_METHODS;
 		(void) write_wrapper(cd, bs, 2); // We don't really care about the result
-		goto bailout;
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
 	} else {
 		bs[0] = 5;
 		bs[1] = found;
@@ -505,18 +514,20 @@ void *socks5_thread(void *thread_data) {
 	/*
 	 * Plain auth negotiated?
 	 */
-	if (found != 0) {
+	if (found != SOCKS5_AUTH_NO_AUTHENTICATION_REQUIRED) {
 		/*
 		 * Check ver and read username len
 		 */
 		r = read(cd, bs, 2);
-		if (r != 2) {
+		if (r != 2 || (ssize_t)bs[1] == 0) {
 			bs[0] = 1;
 			bs[1] = 0xFF;		/* Unsuccessful (not supported) */
 			(void) write_wrapper(cd, bs, 2);
-			goto bailout;
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
 		}
-		c = bs[1]; // ULEN
+		c = (ssize_t)bs[1]; // ULEN
 
 		/*
 		 * Read username and pass len
@@ -525,11 +536,19 @@ void *socks5_thread(void *thread_data) {
 		r = read(cd, uname, c+1);
 		if (r != c+1) {
 			free(uname);
-			goto bailout;
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
 		}
-		i = uname[c]; // PLEN
+		i = (ssize_t)uname[c]; // PLEN
 		uname[c] = 0;
 		c = i;
+		if (c == 0) {
+			free(uname);
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
+		}
 
 		/*
 		 * Read pass
@@ -539,7 +558,9 @@ void *socks5_thread(void *thread_data) {
 		if (r != c) {
 			free(upass);
 			free(uname);
-			goto bailout;
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
 		}
 		upass[c] = 0;
 
@@ -568,16 +589,22 @@ void *socks5_thread(void *thread_data) {
 		/*
 		 * Fuck'em if auth failed
 		 */
-		if (bs[1])
-			goto bailout;
+		if (bs[1]) {
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
+		}
 	}
 
 	/*
 	 * Read request type
 	 */
 	r = read(cd, bs, 4);
-	if (r != 4)
-		goto bailout;
+	if (r != 4) {
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
+	}
 
 	/*
 	 * Is it connect for supported address type (IPv4 or DNS)? If not, fuck'em
@@ -589,7 +616,9 @@ void *socks5_thread(void *thread_data) {
 		bs[3] = 1;			/* Dummy IPv4 */
 		memset(bs+4, 0, 6);
 		(void) write_wrapper(cd, bs, 10);
-		goto bailout;
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
 	}
 
 	/*
@@ -603,38 +632,55 @@ void *socks5_thread(void *thread_data) {
 		uint8_t string_length;
 		ver = 2;			/* FQDN, get string length */
 		r = read(cd, &string_length, 1);
-		if (r != 1)
-			goto bailout;
+		if (r != 1 || string_length <= 0 || string_length > 255) {
+			close(cd);
+			threads_list_add(pthread_self());
+			return NULL;
+		}
 		c = string_length;
-	} else
-		goto bailout;
+	} else {
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
+	}
 
 	addr = (unsigned char *)zmalloc(c + 10 + 1);
 	r = read(cd, addr, c);
-	if (r != c)
-		goto bailout;
-	addr[c] = 0;
-
-	/*
-	 * Convert the address to character string
-	 */
-	if (ver == 1) {
-		snprintf(thost, HOST_BUFSIZE, "%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3]);	/* It's in network byte order */
-	} else {
-		strlcpy(thost, (char *)addr, HOST_BUFSIZE);
+	if (r != c) {
+		free(addr);
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
 	}
+	addr[c] = 0;
 
 	/*
 	 * Read port number and convert to host byte order int
 	 */
 	r = read(cd, &port, 2);
-	if (r != 2)
-		goto bailout;
+	if (r != 2) {
+		free(addr);
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
+	}
 
-	i = 0;
+	/*
+	 * Convert the address to character string
+	 */
+	thost = zmalloc(HOST_BUFSIZE);
+	if (ver == 1) {
+		snprintf(thost, HOST_BUFSIZE, "%d.%d.%d.%d", addr[0], addr[1], addr[2], addr[3]);	/* It's in network byte order */
+	} else {
+		strlcpy(thost, (char *)addr, HOST_BUFSIZE);
+	}
+	free(addr);
+
+	tport = zmalloc(MINIBUF_SIZE);
+	s = 0;
 	if (noproxy_match(thost)) {
 		sd = host_connect(thost, ntohs(port));
-		i = (sd >= 0);
+		s = (sd >= 0);
 	} else {
 		snprintf(tport, MINIBUF_SIZE, "%d", ntohs(port));
 		char *hostname = strdup(thost);
@@ -645,9 +691,10 @@ void *socks5_thread(void *thread_data) {
 		sd = proxy_connect(tcreds, thost, hostname);
 		if (sd == -2) {
 			sd = host_connect(hostname, ntohs(port));
-			i = (sd >= 0);
+			s = (sd >= 0);
 		} else if (sd >= 0) {
-			i = prepare_http_connect(sd, tcreds, thost);
+			// if this fails, it closes sd
+			s = prepare_http_connect(&sd, tcreds, thost);
 		}
 		free(hostname);
 	}
@@ -655,7 +702,7 @@ void *socks5_thread(void *thread_data) {
 	/*
 	 * Direct or proxy connect?
 	 */
-	if (!i) {
+	if (!s) {
 		/*
 		 * Connect/tunnel failed, report
 		 */
@@ -665,7 +712,12 @@ void *socks5_thread(void *thread_data) {
 		bs[3] = 1;			/* Dummy IPv4 */
 		memset(bs+4, 0, 6);
 		(void) write_wrapper(cd, bs, 10);
-		goto bailout;
+		free(thost);
+		free(tport);
+		free(tcreds);
+		close(cd);
+		threads_list_add(pthread_self());
+		return NULL;
 	} else {
 		/*
 		 * All right
@@ -688,33 +740,12 @@ void *socks5_thread(void *thread_data) {
 	 */
 	tunnel(cd, sd);
 
-bailout:
-	if (addr)
-		free(addr);
-	if (auths)
-		free(auths);
-	if (thost)
-		free(thost);
-	if (tport)
-		free(tport);
-	if (bs)
-		free(bs);
-	if (tcreds)
-		free(tcreds);
-	if (sd >= 0)
-		close(sd);
+	free(thost);
+	free(tport);
+	free(tcreds);
 	close(cd);
-
-	/*
-	 * Add ourself to the "threads to join" list.
-	 */
-	if (!serialize) {
-		pthread_mutex_lock(&threads_mtx);
-		pthread_t thread_id = pthread_self();
-		threads_list = plist_add(threads_list, (unsigned long)thread_id, NULL);
-		pthread_mutex_unlock(&threads_mtx);
-	}
-
+	close(sd);
+	threads_list_add(pthread_self());
 	return NULL;
 }
 
@@ -1295,7 +1326,7 @@ int main(int argc, char **argv) {
 			free(tmp);
 		}
 
-		while ((tmp = config_pop(cf, "SOCKS5Users"))) {
+		while ((tmp = config_pop(cf, "SOCKS5User"))) {
 			head = strchr(tmp, ':');
 			if (!head) {
 				syslog(LOG_ERR, "Invalid username:password format for SOCKS5User: %s\n", tmp);
@@ -1303,6 +1334,7 @@ int main(int argc, char **argv) {
 				head[0] = 0;
 				users_list = hlist_add(users_list, tmp, head+1, HLIST_ALLOC, HLIST_ALLOC);
 			}
+			free(tmp);
 		}
 
 
@@ -1760,7 +1792,7 @@ int main(int argc, char **argv) {
 					continue;
 
 				clen = sizeof(caddr);
-				cd = accept(pfds->fd, &caddr.addr, &clen);
+				cd = accept(pfds->fd, (struct sockaddr *)&caddr, &clen);
 
 				if (cd < 0) {
 					syslog(LOG_ERR, "Serious error during accept: %s\n", strerror(errno));
