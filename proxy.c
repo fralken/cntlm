@@ -305,7 +305,6 @@ paclist_t paclist_create(const char *pacp_str) {
 			if (p == NULL) {
 				parent_add(hostname, iport);
 				proxy = proxylist_get(parent_list, parent_count);
-				plist = proxylist_add(plist, parent_count, proxy);
 			}
 		} else { // type == DIRECT
 			while (p != NULL && p->proxy->type != type)
@@ -314,11 +313,12 @@ paclist_t paclist_create(const char *pacp_str) {
 				proxy = (proxy_t *)zmalloc(sizeof(proxy_t));
 				proxy->type = DIRECT;
 				parent_list = proxylist_add(parent_list, ++parent_count, proxy);
-				plist = proxylist_add(plist, parent_count, proxy);
 			}
 		}
 		pthread_mutex_unlock(&parent_mtx);
-		if (p != NULL)
+		if (p == NULL)
+			plist = proxylist_add(plist, parent_count, proxy);
+		else
 			plist = proxylist_add(plist, p->key, p->proxy);
 
 		++plist_count;
@@ -483,6 +483,7 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
 	/*
 	 * We have to invalidate the cached connections if we moved to a different proxy
 	 */
+	pthread_mutex_lock(&parent_mtx);
 	if (parent_curr != proxycurr) {
 		pthread_mutex_lock(&connection_mtx);
 		plist_const_t list = connection_list;
@@ -494,12 +495,11 @@ int proxy_connect(struct auth_s *credentials, const char* url, const char* hostn
 		connection_list = plist_free(connection_list);
 		pthread_mutex_unlock(&connection_mtx);
 
-		pthread_mutex_lock(&parent_mtx);
 		parent_curr = proxycurr;
 		if (pac_initialized && paclist)
 			paclist->proxycurr = proxycurr;
-		pthread_mutex_unlock(&parent_mtx);
 	}
+	pthread_mutex_unlock(&parent_mtx);
 
 	if (i >= 0 && credentials != NULL)
 		copy_auth(credentials, g_creds, /* fullcopy */ !ntlmbasic);
