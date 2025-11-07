@@ -16,8 +16,8 @@
 #include <unistd.h>
 #include <errno.h>
 
-#ifdef __APPLE__
-/* macOS CFStream (CFNetwork) TLS implementation - C API, no Blocks, no Security.framework */
+#if defined(__APPLE__)
+/* macOS CFStream (CFNetwork) TLS implementation */
 #include <CoreFoundation/CoreFoundation.h>
 #include <CFNetwork/CFNetwork.h>
 
@@ -122,8 +122,310 @@ void ssl_close_conn(ssl_conn_t *c) {
 	if (c->wstream) { CFWriteStreamClose(c->wstream); CFRelease(c->wstream); }
 	free(c);
 }
-#else /* OpenSSL path for Linux/others */
+#elif defined(__CYGWIN__)
+/* Windows/Cygwin SSPI (SChannel) implementation - uses system APIs only */
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <sspi.h>
+#include <schannel.h>
+#include <security.h>
 
+/* Linker note: on native Windows you need secur32; with Cygwin the build/link
+   should pick the appropriate system libs. Update Makefile if necessary. */
+
+struct ssl_conn {
+    CredHandle	cred;
+    CtxtHandle	ctx;
+    SOCKET		sd;
+    int		handshake_done;
+    SecPkgContext_StreamSizes sizes;
+    /* receive buffer for encrypted stream data */
+    unsigned char *inbuf;
+    size_t	inlen;
+};
+
+/* helper: send all bytes on socket */
+static int send_all(SOCKET s, const void *buf, size_t len) {
+    const unsigned char *p = buf;
+    size_t left = len;
+    while (left) {
+        int w = send(s, (const char*)p, (int)left, 0);
+        if (w <= 0) return 0;
+        p += w; left -= w;
+    }
+    return 1;
+}
+
+/* helper: receive some bytes (non-fatal if would block) */
+static int recv_some(SOCKET s, unsigned char *buf, int max) {
+    int r = recv(s, (char*)buf, max, 0);
+    if (r <= 0) return r;
+    return r;
+}
+
+/* perform TLS handshake using InitializeSecurityContext (client) */
+ssl_conn_t *ssl_connect_host(const char *host, int port) {
+    struct addrinfo *addresses = NULL;
+    if (!so_resolv(&addresses, host, port)) return NULL;
+    int sd = so_connect(addresses);
+    freeaddrinfo(addresses);
+    if (sd < 0) return NULL;
+    SOCKET s = (SOCKET)sd;
+
+    /* Acquire credentials for Schannel */
+    SEC_WCHAR *pszSchannel = NULL; /* not used with AcquireCredentialsHandleA */
+    TimeStamp ts;
+    CredHandle cred;
+    SCHANNEL_CRED scCred;
+    memset(&scCred, 0, sizeof(scCred));
+    scCred.dwVersion = SCHANNEL_CRED_VERSION;
+    scCred.grbitEnabledProtocols = 0; /* use defaults */
+    scCred.cCreds = 0;
+    scCred.paCred = NULL;
+
+    SECURITY_STATUS sec = AcquireCredentialsHandleA(
+        NULL,
+        UNISP_NAME_A,
+        SECPKG_CRED_OUTBOUND,
+        NULL,
+        &scCred,
+        NULL,
+        NULL,
+        &cred,
+        &ts);
+    if (sec != SEC_E_OK) { closesocket(s); return NULL; }
+
+    CtxtHandle ctx;
+    BOOL haveCtx = FALSE;
+    SecBufferDesc outBufDesc;
+    SecBuffer outSecBuf;
+    SecBufferDesc inBufDesc;
+    SecBuffer inSecBuf;
+    unsigned char inbuf[16384];
+    int inlen = 0;
+    unsigned char *pIn = inbuf;
+
+    /* handshake loop */
+    while (1) {
+        /* Prepare output buffer */
+        outSecBuf.BufferType = SECBUFFER_TOKEN;
+        outSecBuf.cbBuffer = 0;
+        outSecBuf.pvBuffer = NULL;
+        outBufDesc.cBuffers = 1;
+        outBufDesc.pBuffers = &outSecBuf;
+        outBufDesc.ulVersion = SECBUFFER_VERSION;
+
+        SecBufferDesc *pInDesc = NULL;
+        SecBuffer inBuffer;
+        if (inlen > 0) {
+            inBuffer.BufferType = SECBUFFER_TOKEN;
+            inBuffer.cbBuffer = inlen;
+            inBuffer.pvBuffer = pIn;
+            inBufDesc.cBuffers = 1;
+            inBufDesc.pBuffers = &inBuffer;
+            inBufDesc.ulVersion = SECBUFFER_VERSION;
+            pInDesc = &inBufDesc;
+        }
+
+        unsigned long ctxAttr = 0;
+        SECURITY_STATUS r;
+        r = InitializeSecurityContextA(
+            &cred,
+            haveCtx ? &ctx : NULL,
+            (SEC_CHAR*)host,
+            ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY,
+            0,
+            SECURITY_NATIVE_DREP,
+            pInDesc,
+            0,
+            haveCtx ? &ctx : &ctx,
+            &outBufDesc,
+            &ctxAttr,
+            &ts);
+
+        /* send output token if present */
+        if (outSecBuf.cbBuffer && outSecBuf.pvBuffer) {
+            if (!send_all(s, outSecBuf.pvBuffer, outSecBuf.cbBuffer)) {
+                if (outSecBuf.pvBuffer) FreeContextBuffer(outSecBuf.pvBuffer);
+                if (haveCtx) DeleteSecurityContext(&ctx);
+                FreeCredentialsHandle(&cred);
+                closesocket(s);
+                return NULL;
+            }
+            FreeContextBuffer(outSecBuf.pvBuffer);
+            outSecBuf.pvBuffer = NULL;
+        }
+
+        if (r == SEC_E_OK) {
+            haveCtx = TRUE;
+            break; /* handshake complete */
+        } else if (r == SEC_I_CONTINUE_NEEDED || r == SEC_E_INCOMPLETE_MESSAGE || r == SEC_E_OK) {
+            /* need to read more data */
+            int rr = recv_some(s, inbuf + inlen, (int)(sizeof(inbuf) - inlen));
+            if (rr <= 0) {
+                /* error or closed */
+                if (haveCtx) DeleteSecurityContext(&ctx);
+                FreeCredentialsHandle(&cred);
+                closesocket(s);
+                return NULL;
+            }
+            inlen += rr;
+            pIn = inbuf;
+            /* loop and call InitializeSecurityContext again */
+            haveCtx = TRUE; /* ensure we pass ctx next time */
+            continue;
+        } else {
+            /* handshake failure */
+            if (haveCtx) DeleteSecurityContext(&ctx);
+            FreeCredentialsHandle(&cred);
+            closesocket(s);
+            return NULL;
+        }
+    }
+
+    /* Query stream sizes */
+    SecPkgContext_StreamSizes sizes;
+    sec = QueryContextAttributes(&ctx, SECPKG_ATTR_STREAM_SIZES, &sizes);
+    if (sec != SEC_E_OK) {
+        DeleteSecurityContext(&ctx);
+        FreeCredentialsHandle(&cred);
+        closesocket(s);
+        return NULL;
+    }
+
+    ssl_conn_t *c = zmalloc(sizeof(*c));
+    if (!c) { DeleteSecurityContext(&ctx); FreeCredentialsHandle(&cred); closesocket(s); return NULL; }
+    c->cred = cred;
+    c->ctx = ctx;
+    c->sd = s;
+    c->handshake_done = 1;
+    c->sizes = sizes;
+    c->inbuf = NULL;
+    c->inlen = 0;
+    return c;
+}
+
+/* write: encrypt application data with EncryptMessage and send */
+ssize_t ssl_write_all(ssl_conn_t *c, const void *buf, size_t len) {
+    if (!c || !c->handshake_done) return -1;
+    if (len == 0) return 0;
+
+    /* allocate buffer: header + data + trailer */
+    size_t hdr = c->sizes.cbHeader;
+    size_t trailer = c->sizes.cbTrailer;
+    size_t msglen = hdr + len + trailer;
+    unsigned char *out = zmalloc(msglen);
+    if (!out) return -1;
+
+    /* place data in the middle */
+    unsigned char *pdata = out + hdr;
+    memcpy(pdata, buf, len);
+
+    SecBuffer secBuff[4];
+    secBuff[0].BufferType = SECBUFFER_STREAM_HEADER;
+    secBuff[0].pvBuffer = out;
+    secBuff[0].cbBuffer = (unsigned long)hdr;
+    secBuff[1].BufferType = SECBUFFER_DATA;
+    secBuff[1].pvBuffer = pdata;
+    secBuff[1].cbBuffer = (unsigned long)len;
+    secBuff[2].BufferType = SECBUFFER_STREAM_TRAILER;
+    secBuff[2].pvBuffer = out + hdr + len;
+    secBuff[2].cbBuffer = (unsigned long)trailer;
+    secBuff[3].BufferType = SECBUFFER_EMPTY;
+    SecBufferDesc msg;
+    msg.ulVersion = SECBUFFER_VERSION;
+    msg.cBuffers = 4;
+    msg.pBuffers = secBuff;
+
+    SECURITY_STATUS r = EncryptMessage(&c->ctx, 0, &msg, 0);
+    if (r != SEC_E_OK) { free(out); return -1; }
+
+    /* compute total size (header + data + trailer might have changed sizes) */
+    size_t sendlen = 0;
+    for (int i = 0; i < 3; ++i) sendlen += secBuff[i].cbBuffer;
+
+    /* send all */
+    int ok = send_all(c->sd, secBuff[0].pvBuffer, secBuff[0].cbBuffer) &&
+             send_all(c->sd, secBuff[1].pvBuffer, secBuff[1].cbBuffer) &&
+             send_all(c->sd, secBuff[2].pvBuffer, secBuff[2].cbBuffer);
+
+    free(out);
+    if (!ok) return -1;
+    return (ssize_t)len;
+}
+
+/* read: receive encrypted stream bytes, call DecryptMessage, return plaintext */
+ssize_t ssl_read(ssl_conn_t *c, void *buf, size_t len) {
+    if (!c || !c->handshake_done) return -1;
+    /* maintain a simple input buffer */
+    if (!c->inbuf) {
+        c->inbuf = zmalloc(16384);
+        c->inlen = 0;
+        if (!c->inbuf) return -1;
+    }
+
+    /* try decrypt loop: recv some bytes then call DecryptMessage */
+    while (1) {
+        /* prepare buffers */
+        SecBuffer secBuff[4];
+        secBuff[0].pvBuffer = c->inbuf;
+        secBuff[0].cbBuffer = (unsigned long)c->inlen;
+        secBuff[0].BufferType = SECBUFFER_STREAM;
+        secBuff[1].BufferType = SECBUFFER_DATA;
+        secBuff[1].pvBuffer = NULL;
+        secBuff[1].cbBuffer = 0;
+        secBuff[2].BufferType = SECBUFFER_EMPTY;
+        secBuff[3].BufferType = SECBUFFER_EMPTY;
+        SecBufferDesc msg; msg.ulVersion = SECBUFFER_VERSION; msg.cBuffers = 4; msg.pBuffers = secBuff;
+        SECURITY_STATUS r = DecryptMessage(&c->ctx, &msg, 0, NULL);
+        if (r == SEC_E_OK) {
+            /* find data buffer */
+            for (int i = 0; i < 4; ++i) {
+                if (secBuff[i].BufferType == SECBUFFER_DATA && secBuff[i].cbBuffer > 0) {
+                    size_t got = secBuff[i].cbBuffer;
+                    size_t tocopy = (got > len) ? len : got;
+                    memcpy(buf, secBuff[i].pvBuffer, tocopy);
+
+                    /* if there are leftover bytes (stream), move them to front */
+                    size_t left = 0;
+                    if (secBuff[0].BufferType == SECBUFFER_STREAM && secBuff[0].cbBuffer > 0) {
+                        left = secBuff[0].cbBuffer;
+                        memmove(c->inbuf, secBuff[0].pvBuffer, left);
+                    }
+                    c->inlen = left;
+                    return (ssize_t)tocopy;
+                }
+            }
+            /* no data yet, continue to read */
+        } else if (r == SEC_E_INCOMPLETE_MESSAGE) {
+            /* need more data from socket */
+            if (c->inlen >= 16384) return -1;
+            int rr = recv_some(c->sd, c->inbuf + c->inlen, (int)(16384 - c->inlen));
+            if (rr <= 0) return (rr == 0) ? 0 : -1;
+            c->inlen += rr;
+            continue;
+        } else {
+            /* fatal error */
+            return -1;
+        }
+    }
+}
+
+void ssl_close_conn(ssl_conn_t *c) {
+    if (!c) return;
+    /* try to close TLS gracefully */
+    if (c->handshake_done) {
+        /* no explicit SSPI shutdown token here — just delete context */
+        DeleteSecurityContext(&c->ctx);
+    }
+    FreeCredentialsHandle(&c->cred);
+    if (c->sd) closesocket(c->sd);
+    if (c->inbuf) free(c->inbuf);
+    free(c);
+}
+#else
+/* OpenSSL path for Linux/others */
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <netdb.h>

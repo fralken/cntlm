@@ -30,9 +30,17 @@ ifeq ($(OS),Darwin)
 	endif
 	CFLAGS += -arch $(ARCH)
 # Change binary directory for macOS
+	BINDIR := $(DESTDIR)$(PREFIX)/bin
+# On macOs use system CFNetwork and CoreFoundation
 	LDFLAGS += -framework CFNetwork -framework CoreFoundation
 else
+ifneq ($(findstring CYGWIN,$(OS)),)
+# On Cygwin/Windows use system SSPI/SChannel and Winsock
+	LDFLAGS += -lsecur32 -lws2_32
+else
+# On other Unix-like systems use OpenSSL
 	LDFLAGS += -lssl -lcrypto
+endif
 endif
 
 ifeq ($(CC),gcc)
