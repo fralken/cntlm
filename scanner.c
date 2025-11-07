@@ -118,7 +118,7 @@ int scanner_hook(rr_data_const_t request, rr_data_t response, struct auth_s *cre
 			lsize = BUFSIZE;
 			line = zmalloc(lsize);
 			do {
-				i = so_recvln(*sd, &line, &lsize);
+				i = http_recvln(*sd, &line, &lsize);
 
 				c = (int)strlen(line);
 				if (len + c >= bsize) {

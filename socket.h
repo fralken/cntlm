@@ -39,6 +39,5 @@ extern int so_connect(struct addrinfo *adresses);
 extern int so_listen(plist_t *list, struct addrinfo *adresses, void *aux);
 extern int so_dataready(int fd);
 extern int so_closed(int fd);
-extern int so_recvln(int fd, char **buf, int *size);
 
 #endif /* SOCKET_H */

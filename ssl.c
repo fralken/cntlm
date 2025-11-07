@@ -193,49 +193,18 @@ void ssl_close_conn(ssl_conn_t *c) {
 
 #endif /* platform branches */
 
-int ssl_recvln(ssl_conn_t *c, char **buf, int *bsize) {
-	if (!c || !buf || !bsize) return -1;
-	int pos = 0;
-	char ch;
-	int r;
-	if (!*buf || *bsize <= 0) return -1;
-	while (1) {
-		r = (int)ssl_read(c, &ch, 1);
-		if (r < 0) return -1;
-		if (r == 0) return 0;
-		if (pos + 2 > *bsize) {
-			int nb = (*bsize) * 2;
-			char *n = realloc(*buf, nb);
-			if (!n) return -1;
-			*buf = n;
-			*bsize = nb;
-		}
-		(*buf)[pos++] = ch;
-		if (ch == '\n') break;
-	}
-	(*buf)[pos] = '\0';
-	return pos;
-}
-
 /* ---------- io_t wrappers ---------- */
 
-io_t *io_from_fd(int fd) {
-	io_t *io = zmalloc(sizeof(*io));
-	if (!io) return NULL;
+void io_from_fd(io_t *io, int fd) {
 	io->type = IO_TYPE_FD;
 	io->fd = fd;
 	io->ssl = NULL;
-	return io;
 }
 
-io_t *io_from_ssl(ssl_conn_t *c) {
-	if (!c) return NULL;
-	io_t *io = zmalloc(sizeof(*io));
-	if (!io) return NULL;
+void io_from_ssl(io_t *io, ssl_conn_t *c) {
 	io->type = IO_TYPE_SSL;
 	io->ssl = c;
 	io->fd = -1;
-	return io;
 }
 
 void io_close(io_t *io) {
@@ -243,18 +212,15 @@ void io_close(io_t *io) {
 	if (io->type == IO_TYPE_SSL && io->ssl) {
 		ssl_close_conn(io->ssl);
 	}
-	/* do not close plain fd here unless explicitly owned */
 	if (io->type == IO_TYPE_FD && io->fd >= 0) {
 		close(io->fd);
 	}
-	free(io);
 }
 
 ssize_t io_write_all(io_t *io, const void *buf, size_t len) {
 	if (!io) return -1;
 	if (io->type == IO_TYPE_FD) {
-		/* use existing write wrapper for plain sockets */
-		return (ssize_t)write_wrapper(io->fd, buf, len);
+		return write_wrapper(io->fd, buf, len);
 	} else {
 		return ssl_write_all(io->ssl, buf, len);
 	}
@@ -268,14 +234,5 @@ ssize_t io_read(io_t *io, void *buf, size_t len) {
 		return r;
 	} else {
 		return ssl_read(io->ssl, buf, len);
-	}
-}
-
-int io_recvln(io_t *io, char **buf, int *bsize) {
-	if (!io) return -1;
-	if (io->type == IO_TYPE_FD) {
-		return so_recvln(io->fd, buf, bsize);
-	} else {
-		return ssl_recvln(io->ssl, buf, bsize);
 	}
 }

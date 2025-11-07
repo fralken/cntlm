@@ -78,6 +78,58 @@ char *get_http_header_value(const char *src) {
 }
 
 /*
+ * Receive a single line from the socket. This is no super-efficient
+ * implementation, but more than we need to read in a few headers.
+ * What's more, the data is actually recv'd from a socket buffer.
+ *
+ * I had to time this in comparison to recv with block read :) and
+ * the performance was very similar. Given the fact that it keeps us
+ * from creating a whole buffering scheme around the socket (HTTP
+ * connection is both line and block oriented, switching back and forth),
+ * it is actually OK.
+ *
+ * This function is the io_t-aware variant: it accepts either a plain
+ * FD or an ssl_conn via io_t. For plain FDs the original so_recvln logic
+ * is used verbatim. For SSL connections it delegates to ssl_recvln().
+ */
+int http_recvln_io(io_t *io, char **buf, int *size) {
+	int len = 0;
+	int r = 1;
+	char c = 0;
+	char *tmp;
+
+	if (!io || !buf || !size || !*buf) return -1;
+
+	while (len < *size-1 && c != '\n') {
+		r = (int)io_read(io, &c, 1);
+		if (r <= 0)
+			break;
+
+		(*buf)[len++] = c;
+
+		/*
+		* End of buffer, still no EOL? Resize the buffer
+		*/
+		if (len == *size-1 && c != '\n') {
+			int ts = *size * 2;
+			tmp = realloc(*buf, ts);
+			if (tmp == NULL)
+				return -1;
+			*buf = tmp;
+			*size = ts;
+		}
+	}
+	(*buf)[len] = 0;
+	return r;
+}
+
+int http_recvln(int fd, char **buf, int *size) {
+	io_t io;
+	io_from_fd(&io, fd);
+	return http_recvln_io(&io, buf, size);
+}
+
+/*
  * Receive HTTP request/response from the given socket. Fill in pre-allocated
  * rr_data_t structure.
  * Returns: 1 if OK, 0 in case of socket EOF or other error
@@ -97,7 +149,7 @@ int headers_recv_io(io_t *io, rr_data_t data) {
 	bsize = BUFSIZE;
 	buf = zmalloc(bsize);
 
-	i = io_recvln(io, &buf, &bsize);
+	i = http_recvln_io(io, &buf, &bsize);
 	if (i <= 0) goto bailout;
 
 	if (debug) printf("HEAD: %s", buf);
@@ -176,7 +228,7 @@ int headers_recv_io(io_t *io, rr_data_t data) {
 	 * Read in all headers, do not touch any possible HTTP body
 	 */
 	do {
-		i = io_recvln(io, &buf, &bsize);
+		i = http_recvln_io(io, &buf, &bsize);
 		trimr(buf);
 		if (i > 0 && is_http_header(buf)) {
 			data->headers = hlist_add(data->headers, get_http_header_name(buf), get_http_header_value(buf), HLIST_NOALLOC, HLIST_NOALLOC);
@@ -233,11 +285,9 @@ bailout:
 }
 
 int headers_recv(int fd, rr_data_t data) {
-	io_t *io = io_from_fd(fd);
-	if (!io) return 0;
-	int rc = headers_recv_io(io, data);
-	free(io);
-	return rc;
+	io_t io;
+	io_from_fd(&io, fd);
+	return headers_recv_io(&io, data);
 }
 
 /*
@@ -318,11 +368,9 @@ int headers_send_io(io_t *io, rr_data_const_t data) {
 }
 
 int headers_send(int fd, rr_data_const_t data) {
-	io_t *io = io_from_fd(fd);
-	if (!io) return 0;
-	int rc = headers_send_io(io, data);
-	free(io); /* io_from_fd doesn't own fd, just free wrapper */
-	return rc;
+	io_t io;
+	io_from_fd(&io, fd);
+	return headers_send_io(&io, data);
 }
 
 /*
@@ -398,7 +446,7 @@ int chunked_data_send(int dst, int src) {
 
 	/* Take care of all chunks */
 	do {
-		i = so_recvln(src, &buf, &bsize);
+		i = http_recvln(src, &buf, &bsize);
 		if (i <= 0) {
 			if (debug)
 				printf("chunked_data_send: aborting, read error\n");
@@ -430,7 +478,7 @@ int chunked_data_send(int dst, int src) {
 	/* Take care of possible trailer */
 	w = len = 0;
 	do {
-		i = so_recvln(src, &buf, &bsize);
+		i = http_recvln(src, &buf, &bsize);
 		if (dst >= 0 && i > 0) {
 			len = strlen(buf);
 			w = write_wrapper(dst, buf, len);
@@ -713,7 +761,7 @@ static int http_read_body_io(io_t *io, rr_data_const_t response, char **outbuf, 
 		char *err = NULL;
 		long csize;
 		do {
-			int r = io_recvln(io, &line, &bsize);
+			int r = http_recvln_io(io, &line, &bsize);
 			if (r <= 0) { free(line); free(buf); return 0; }
 			trimr(line);
 			csize = strtol(line, &err, 16);
@@ -738,7 +786,7 @@ static int http_read_body_io(io_t *io, rr_data_const_t response, char **outbuf, 
 			}
 		} while (csize != 0);
 		do {
-			int r = io_recvln(io, &line, &bsize);
+			int r = http_recvln_io(io, &line, &bsize);
 			if (r <= 0) { free(line); free(buf); return 0; }
 		} while (line[0] != '\r' && line[0] != '\n');
 		free(line);
@@ -821,7 +869,7 @@ int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
 
 	char *body = NULL;
 	size_t bodylen = 0;
-	io_t *io = NULL;
+	io_t io;
 
 	if (!is_https) {
 		/* plain socket path: resolve/connect, use owned fd wrapper */
@@ -831,28 +879,26 @@ int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
 		freeaddrinfo(addresses);
 		if (sd < 0) { free_rr_data(&req); free(host); return 0; }
 
-		io = io_from_fd(sd);
-		if (!io) { close(sd); free_rr_data(&req); free(host); return 0; }
+		io_from_fd(&io, sd);
 	} else {
 		/* TLS: connect via ssl abstraction, wrap into io, reuse same logic */
 		ssl_conn_t *s = ssl_connect_host(host, port);
 		if (!s) { free_rr_data(&req); free(host); return 0; }
 
-		io = io_from_ssl(s);
-		if (!io) { ssl_close_conn(s); free_rr_data(&req); free(host); return 0; }
+		io_from_ssl(&io, s);
 	}
 
-	if (!headers_send_io(io, req)) { io_close(io); free_rr_data(&req); free(host); return 0; }
+	if (!headers_send_io(&io, req)) { io_close(&io); free_rr_data(&req); free(host); return 0; }
 	free_rr_data(&req);
 
 	rr_data_t res = new_rr_data();
-	if (!headers_recv_io(io, res)) { free_rr_data(&res); io_close(io); free(host); return 0; }
+	if (!headers_recv_io(&io, res)) { free_rr_data(&res); io_close(&io); free(host); return 0; }
 	if (outcode) *outcode = res->code;
 
-	if (!http_read_body_io(io, res, &body, &bodylen)) { free_rr_data(&res); io_close(io); free(host); return 0; }
+	if (!http_read_body_io(&io, res, &body, &bodylen)) { free_rr_data(&res); io_close(&io); free(host); return 0; }
 	free_rr_data(&res);
 
-	io_close(io);
+	io_close(&io);
 
 	free(host);
 

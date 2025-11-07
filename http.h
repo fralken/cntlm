@@ -40,6 +40,7 @@ extern int is_http_header(const char *src);
 extern char *get_http_header_name(const char *src);
 extern char *get_http_header_value(const char *src);
 extern int http_parse_basic(hlist_const_t headers, const char *header, struct auth_s *tcreds);
+extern int http_recvln(int fd, char **buf, int *size);
 extern int headers_recv(int fd, rr_data_t data);
 extern int headers_send(int fd, rr_data_const_t data);
 extern int tunnel(int cd, int sd);

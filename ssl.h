@@ -28,8 +28,8 @@ ssize_t ssl_read(ssl_conn_t *c, void *buf, size_t len);
 int ssl_recvln(ssl_conn_t *c, char **buf, int *bsize);
 
 /* io_t helpers */
-io_t *io_from_fd(int fd);               /* wrapper on fd; io_close will close it */
-io_t *io_from_ssl(ssl_conn_t *c);       /* ssl_conn; io_close will close it */
+void io_from_fd(io_t *io, int fd);               /* wrapper on fd; io_close will close it */
+void io_from_ssl(io_t *io, ssl_conn_t *c);       /* ssl_conn; io_close will close it */
 void io_close(io_t *io);                /* free and optionally close underlying */
 
 ssize_t io_write_all(io_t *io, const void *buf, size_t len);
