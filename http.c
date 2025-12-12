@@ -849,13 +849,21 @@ int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
 	else return 0;
 
 	char *host = NULL;
-	int port = is_https ? 443 : 80;
 	const char *path = strchr(p, '/');
 	if (path) host = substr(p, 0, (int)(path - p));
 	else { host = strdup(p); path = "/"; }
 
+	if (!host) return 0;
+
+	int port = is_https ? 443 : 80;
 	char *colon = strchr(host, ':');
-	if (colon) { *colon = '\0'; port = atoi(colon+1); if (port == 0) port = is_https ? 443 : 80; }
+	if (colon) {
+		*colon = '\0';
+		int parsed_port = atoi(colon+1);
+		if (parsed_port > 0 && parsed_port <= 65535) {
+			port = parsed_port;
+		}
+	}
 
 	/* Common request construction */
 	rr_data_t req = new_rr_data();
@@ -863,7 +871,18 @@ int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
 	req->method = strdup("GET");
 	req->url = strdup(path);
 	req->http = strdup("HTTP/1.1");
-	req->headers = hlist_add(req->headers, "Host", host, HLIST_ALLOC, HLIST_ALLOC);
+
+	/* Build Host header - include port for non-standard ports */
+	char *host_header;
+	if ((is_https && port != 443) || (!is_https && port != 80)) {
+		size_t host_len = strlen(host) + 7; /* host + ":65535" + null */
+		host_header = zmalloc(host_len);
+		snprintf(host_header, host_len, "%s:%d", host, port);
+		req->headers = hlist_add(req->headers, "Host", host_header, HLIST_ALLOC, HLIST_NOALLOC);
+	} else {
+		req->headers = hlist_add(req->headers, "Host", host, HLIST_ALLOC, HLIST_ALLOC);
+	}
+
 	req->headers = hlist_add(req->headers, "User-Agent", "cntlm-fetch/1.0", HLIST_ALLOC, HLIST_ALLOC);
 	req->headers = hlist_add(req->headers, "Connection", "close", HLIST_ALLOC, HLIST_ALLOC);
 
@@ -874,32 +893,57 @@ int fetch_url(const char *url, char **outbuf, size_t *outlen, int *outcode) {
 	if (!is_https) {
 		/* plain socket path: resolve/connect, use owned fd wrapper */
 		struct addrinfo *addresses = NULL;
-		if (!so_resolv(&addresses, host, port)) { free_rr_data(&req); free(host); return 0; }
+		if (!so_resolv(&addresses, host, port)) {
+			free_rr_data(&req);
+			free(host);
+			return 0;
+		}
 		int sd = so_connect(addresses);
 		freeaddrinfo(addresses);
-		if (sd < 0) { free_rr_data(&req); free(host); return 0; }
-
+		if (sd < 0) {
+			free_rr_data(&req);
+			free(host);
+			return 0;
+		}
 		io_from_fd(&io, sd);
 	} else {
 		/* TLS: connect via ssl abstraction, wrap into io, reuse same logic */
 		ssl_conn_t *s = ssl_connect_host(host, port);
-		if (!s) { free_rr_data(&req); free(host); return 0; }
+		if (!s) {
+			free_rr_data(&req);
+			free(host);
+			return 0;
+		}
 
 		io_from_ssl(&io, s);
 	}
 
-	if (!headers_send_io(&io, req)) { io_close(&io); free_rr_data(&req); free(host); return 0; }
+	if (!headers_send_io(&io, req)) { 
+		io_close(&io);
+		free_rr_data(&req);
+		free(host);
+		return 0;
+	}
 	free_rr_data(&req);
 
 	rr_data_t res = new_rr_data();
-	if (!headers_recv_io(&io, res)) { free_rr_data(&res); io_close(&io); free(host); return 0; }
+	if (!headers_recv_io(&io, res)) {
+		free_rr_data(&res);
+		io_close(&io);
+		free(host);
+		return 0;
+	}
 	if (outcode) *outcode = res->code;
 
-	if (!http_read_body_io(&io, res, &body, &bodylen)) { free_rr_data(&res); io_close(&io); free(host); return 0; }
+	if (!http_read_body_io(&io, res, &body, &bodylen)) {
+		free_rr_data(&res);
+		io_close(&io);
+		free(host);
+		return 0;
+	}
+
 	free_rr_data(&res);
-
 	io_close(&io);
-
 	free(host);
 
 	*outbuf = body;
